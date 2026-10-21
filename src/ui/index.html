@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; media-src 'self' blob: vesper:; connect-src 'self' vesper: blob: data:; worker-src 'self' blob:">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vesper Audio</title>
+  <link rel="icon" href="assets/icon-64.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="titlebar"><img src="assets/icon-64.png" alt="" width="18" height="18"><span>Vesper Audio</span></div>
+  <div class="shell">
+    <nav class="rail" aria-label="Main">
+      <div class="logo"><img src="assets/icon.png" alt="Vesper Audio" width="40" height="40"></div>
+      <button class="nav active" data-page="home" title="Home" aria-label="Home"><span data-icon="home" data-size="22"></span></button>
+      <button class="nav" data-page="properties" title="Properties" aria-label="Properties"><span data-icon="sliders" data-size="22"></span></button>
+      <button class="nav" data-page="board" title="Sound-Board" aria-label="Sound-Board"><span data-icon="board" data-size="22"></span></button>
+      <button class="nav bottom" data-page="settings" title="Settings" aria-label="Settings"><span data-icon="settings" data-size="22"></span></button>
+    </nav>
+
+    <main class="content">
+      <div id="banners"></div>
+
+      <section class="page active" id="page-home">
+        <h1>Home</h1>
+        <div class="device-row">
+          <div class="card device-card">
+            <span class="label">Current Device:</span>
+            <div class="select" data-select="device">
+              <button class="select-btn" type="button"><span class="select-text" data-device-name>No device</span><span data-icon="chevron" data-size="18"></span></button>
+              <div class="menu" hidden></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="row">
+            <label class="check"><input type="checkbox" id="ai-on"><span class="box"><span data-icon="check" data-size="16"></span></span><span class="title">AI Noise Cancellation</span></label>
+            <div class="inline-select"><span class="muted">Preset:</span>
+              <div class="select" data-select="ai-preset">
+                <button class="select-btn" type="button"><span class="select-text" id="ai-preset-text">Custom</span><span data-icon="chevron" data-size="18"></span></button>
+                <div class="menu" hidden>
+                  <button class="menu-item" data-value="custom"><b>Custom</b><small>Speak a paragraph once and the AI learns your voice. It keeps your voice and laughs and drops everything else.</small></button>
+                  <button class="menu-item" data-value="clearcast"><b>ClearCast</b><small>Studio-grade AI speech cleanup in the style of SteelSeries Sonar. Strength is adjustable.</small></button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="sub" id="ai-sub">
+            <div id="ai-custom-note" class="note"><span data-icon="mic" data-size="18"></span><span id="voice-status">Custom is best and needs no slider.</span><button class="btn small" id="voice-enroll" type="button">Record voice</button></div>
+            <div id="ai-strength-row" class="slider-row" hidden><span class="muted">Strength</span><input type="range" id="ai-strength" min="0" max="100" step="1"><output id="ai-strength-out">80%</output></div>
+          </div>
+        </div>
+
+        <div class="card" id="basic-card">
+          <div class="row">
+            <label class="check"><input type="checkbox" id="basic-on"><span class="box"><span data-icon="check" data-size="16"></span></span><span class="title">Basic Noise Cancellation</span></label>
+            <div class="inline-select"><span class="muted">Preset:</span>
+              <div class="select" data-select="basic-preset">
+                <button class="select-btn" type="button"><span class="select-text" id="basic-preset-text">RNNoise</span><span data-icon="chevron" data-size="18"></span></button>
+                <div class="menu" hidden>
+                  <span class="menu-head">OBS presets</span>
+                  <button class="menu-item" data-value="speex"><b>Speex</b><small>Classic DSP suppressor with an adjustable suppression level in dB.</small></button>
+                  <button class="menu-item" data-value="rnnoise"><b>RNNoise</b><small>Lightweight neural noise suppressor.</small></button>
+                </div>
+              </div>
+            </div>
+          </div>
+          <div class="sub" id="basic-sub" hidden>
+            <div class="slider-row"><span class="muted">Suppression</span><input type="range" id="speex-db" min="5" max="60" step="1"><output id="speex-db-out">25 dB</output></div>
+          </div>
+          <p class="hint" id="basic-hint" hidden>Turn off AI Noise Cancellation to use this.</p>
+        </div>
+
+        <div class="card">
+          <div class="row">
+            <label class="check"><input type="checkbox" id="monitor-on"><span class="box"><span data-icon="check" data-size="16"></span></span><span class="title">Test and Hear Yourself</span></label>
+            <span class="muted">You hear yourself for as long as this is ticked.</span>
+          </div>
+          <div class="meter" aria-hidden="true"><i id="meter-home"></i></div>
+        </div>
+      </section>
+
+      <section class="page" id="page-properties">
+        <h1>Properties</h1>
+        <p class="muted lead">Read live from the Windows sound control panel.</p>
+        <div class="device-row">
+          <div class="card device-card">
+            <span class="label">Current Device:</span>
+            <div class="select" data-select="device">
+              <button class="select-btn" type="button"><span class="select-text" data-device-name>No device</span><span data-icon="chevron" data-size="18"></span></button>
+              <div class="menu" hidden></div>
+            </div>
+          </div>
+        </div>
+        <div class="chips" id="device-chips"></div>
+
+        <div class="card">
+          <div class="row">
+            <span class="title">Listen To This Device?</span>
+            <label class="switch"><input type="checkbox" id="listen-on"><span class="track"></span></label>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="slider-row"><span class="label">Levels</span><input type="range" id="level" min="0" max="100" step="1"><output id="level-out">100%</output></div>
+          <div class="meter" aria-hidden="true"><i id="meter-props"></i></div>
+          <div class="slider-row"><span class="label">Custom Audio Gain</span><input type="range" id="gain" min="0" max="400" step="5"><output id="gain-out">100%</output></div>
+          <p class="hint">Gain raises your mic inside Vesper Audio, beyond the Windows level.</p>
+        </div>
+
+        <div class="card">
+          <div class="row">
+            <span class="title">Allow processing done by mic or bypass?</span>
+            <label class="check solo"><input type="checkbox" id="sysfx-on"><span class="box"><span data-icon="check" data-size="16"></span></span></label>
+          </div>
+          <p class="hint">Ticked keeps Windows audio enhancements on for this device. Unticked bypasses them.</p>
+        </div>
+      </section>
+
+      <section class="page" id="page-board">
+        <h1>Sound-Board</h1>
+        <div class="row board-bar">
+          <p class="muted"><span id="sound-count">0</span> of 40 sounds. Click a sound to play it through your virtual mic.</p>
+          <div class="slider-row compact"><span class="muted">Volume</span><input type="range" id="board-volume" min="0" max="100" step="1"><output id="board-volume-out">100%</output></div>
+        </div>
+        <div class="grid" id="sound-grid"></div>
+      </section>
+
+      <section class="page" id="page-settings">
+        <h1>Settings</h1>
+        <div class="card row"><span class="title">Auto Open App &amp; Initialize Drivers on start:</span><label class="check solo"><input type="checkbox" id="set-autostart"><span class="box"><span data-icon="check" data-size="16"></span></span></label></div>
+        <div class="card row"><span class="title">Close App to System Tray on Closing:</span><label class="check solo"><input type="checkbox" id="set-tray"><span class="box"><span data-icon="check" data-size="16"></span></span></label></div>
+        <div class="card row"><span class="title">Re-Download Audio Drivers and Setup them?</span><button class="btn" id="set-driver" type="button">Click to Re-init and Setup</button></div>
+        <div class="card row"><span class="title">Re-Do Custom Paragraph for Custom AI Noise Cancellation?</span><button class="btn" id="set-voice" type="button">Click to Re-do</button></div>
+        <div class="card row">
+          <span class="title">Virtual mic output</span>
+          <div class="select" data-select="cable"><button class="select-btn" type="button"><span class="select-text" id="cable-text">Auto</span><span data-icon="chevron" data-size="18"></span></button><div class="menu" hidden></div></div>
+        </div>
+        <div class="card row">
+          <span class="title">Hear-yourself output</span>
+          <div class="select" data-select="monitor"><button class="select-btn" type="button"><span class="select-text" id="monitor-text">System default</span><span data-icon="chevron" data-size="18"></span></button><div class="menu" hidden></div></div>
+        </div>
+        <div class="foot">
+          <div class="card row"><span class="title">Developed By Ayush.ue5</span></div>
+          <div class="card row"><span class="title">Open Repo of this App :</span><button class="btn small" id="set-repo" type="button"><span data-icon="github" data-size="16"></span>Open</button></div>
+        </div>
+        <p class="muted version" id="version"></p>
+      </section>
+    </main>
+  </div>
+
+  <div class="overlay" id="overlay" hidden>
+    <div class="dialog" role="dialog" aria-modal="true" aria-labelledby="dlg-title">
+      <h2 id="dlg-title"></h2>
+      <div id="dlg-body"></div>
+      <div class="dlg-actions" id="dlg-actions"></div>
+    </div>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>
