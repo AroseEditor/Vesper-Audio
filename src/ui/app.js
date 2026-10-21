@@ -95,6 +95,7 @@ function engineConfig() {
     basic: s.basic,
     basicPreset: s.basicPreset,
     speexDb: s.speexDb,
+    voiceSensitivity: s.voiceSensitivity,
     monitor: s.monitor,
     boardVolume: s.boardVolume,
     voiceprint: s.voiceprints[tier] || null,
@@ -197,7 +198,7 @@ async function rebuildPrint(tier, onProgress) {
   const speaker = await ensureSpeaker(tier)
   const samples = await api.invoke('voice:load')
   const progress = onProgress || (p => notice('voice', { text: 'Learning your voice ' + Math.round(p * 100) + '%' }))
-  const print = await buildPrint(speaker, samples.map(x => bytesToPcm(x.bytes)), progress, tier === 'heavy' ? 0.4 : 0.42)
+  const print = await buildPrint(speaker, samples.map(x => bytesToPcm(x.bytes)), progress, tier === 'heavy' ? 0.38 : 0.4)
   state.settings.voiceprints = { ...state.settings.voiceprints, [tier]: print }
   await save({ voiceprints: state.settings.voiceprints })
 }
@@ -442,10 +443,29 @@ function renderBoard() {
   $('sound-grid').replaceChildren(add, ...tiles)
 }
 
+const SENSITIVITY = {
+  relaxed: { label: 'Relaxed', small: 'Lets your voice through easily, even when you sound different. Other voices may leak in more.' },
+  balanced: { label: 'Balanced', small: 'Recommended. Keeps your voice open and blocks other people.' },
+  strict: { label: 'Strict', small: 'Blocks other voices hardest. Your voice may drop out when you sound unusual.' }
+}
+
 function renderSettings() {
   $('set-autostart').checked = state.settings.autoStart
   $('set-tray').checked = state.settings.closeToTray
-  $('version').textContent = 'Vesper Audio ' + state.info.version + (state.driver && state.driver.running ? '  |  Vesper Audio Cable running' : '')
+  $('version').textContent = 'Vesper Audio ' + state.info.version + (vacOut() && vacIn() ? '  |  Vesper Audio Cable ready' : '')
+  const level = SENSITIVITY[state.settings.voiceSensitivity] ? state.settings.voiceSensitivity : 'balanced'
+  $('sens-text').textContent = SENSITIVITY[level].label
+  menuItems(
+    document.querySelector('[data-select="sensitivity"] .menu'),
+    Object.entries(SENSITIVITY).map(([value, v]) => ({ value, label: v.label, small: v.small })),
+    level,
+    async v => {
+      closeMenus()
+      await save({ voiceSensitivity: v })
+      renderAll()
+      sync()
+    }
+  )
 }
 
 function renderAll() {
@@ -465,11 +485,11 @@ function renderDriverNotice() {
   if (pendingReboot()) {
     return notice('driver', { text: 'Vesper Audio Cable is installed. Restart Windows to finish setup.', label: 'Restart', action: () => restartDialog() })
   }
-  if (d && d.secureBoot && !d.testSigning) {
-    return notice('driver', { text: 'Secure Boot is on, so Windows will not load the Vesper Audio Cable driver.', label: 'Show steps', action: () => secureBootDialog() })
-  }
   if (d && d.nodePresent && !d.running) {
-    return notice('driver', { text: `Vesper Audio Cable is installed but Windows could not start it (code ${d.problem}).`, label: 'Fix', action: () => installDriver() })
+    return notice('driver', { text: `The fallback Vesper Audio Cable driver is installed but Windows could not start it (code ${d.problem}).`, label: 'Fix', action: () => installOwnDriver() })
+  }
+  if (d && d.vbPresent) {
+    return notice('driver', { text: 'The cable driver is installed but its devices are missing. Run setup again to repair it.', label: 'Repair', action: () => installDriver() })
   }
   notice('driver', { text: 'Vesper Audio Cable is not installed. Other apps cannot hear Vesper Audio until it is.', label: 'Install', action: () => installDriver() })
 }
@@ -488,6 +508,19 @@ async function refreshDevices() {
   state.devicesKey = key
   state.devices = next
   renderAll()
+  brandCable()
+}
+
+let brandTries = 0
+
+async function brandCable() {
+  if (brandTries >= 3 || !state.settings.cableOwned || !state.devices.some(d => d.cable === 'vb')) return
+  brandTries++
+  try {
+    await api.invoke('driver:brand')
+  } catch {}
+  state.devicesKey = ''
+  refreshDevices()
 }
 
 function closeMenus() {
@@ -757,7 +790,7 @@ function secureBootDialog() {
           closeDialog()
           await refreshDriver()
           renderAll()
-          if (!(state.driver && state.driver.secureBoot && !state.driver.testSigning)) installDriver()
+          if (!(state.driver && state.driver.secureBoot && !state.driver.testSigning)) installOwnDriver()
         }
       }
     ]
@@ -835,6 +868,79 @@ const PROBLEMS = {
 }
 
 async function installDriver() {
+  const bar = h('i')
+  const text = h('p', { class: 'muted' })
+  const finishDialog = (title, body, actions) => {
+    $('dlg-title').textContent = title
+    $('dlg-body').replaceChildren(...[].concat(body))
+    $('dlg-actions').replaceChildren(...actions)
+  }
+  const closeButton = h('button', { class: 'btn primary', type: 'button', text: 'Close', onclick: closeDialog })
+  const run = async () => {
+    $('dlg-actions').replaceChildren()
+    const off = api.on('driver:progress', p => {
+      bar.style.width = Math.round(p.value * 100) + '%'
+      text.textContent = p.text
+    })
+    $('dlg-body').replaceChildren(text, h('div', { class: 'progress' }, bar))
+    try {
+      await api.invoke('driver:install', 'cable')
+      off()
+      await save({ setupDone: true, cableOwned: true })
+      text.textContent = 'Checking that Windows created the devices'
+      if (await waitForCable(20000)) {
+        brandTries = 0
+        await save({ pendingReboot: 0 })
+        finishDialog('Vesper Audio Cable is ready', h('p', { text: 'The virtual microphone is installed and renamed Vesper Audio Cable. Pick it as the microphone in Discord, OBS, games or any other app.' }), [closeButton])
+      } else {
+        await save({ pendingReboot: Date.now() })
+        finishDialog('Restart Windows to finish', h('p', { text: 'If you pressed Install Driver in the VB-Audio window, Windows only creates the devices after a restart. If you closed that window without installing, press Download and install again.' }), [
+          h('button', { class: 'btn', type: 'button', text: 'Later', onclick: closeDialog }),
+          h('button', { class: 'btn primary', type: 'button', text: 'Restart', onclick: restartDialog })
+        ])
+      }
+    } catch (err) {
+      off()
+      finishDialog('Driver setup failed', h('p', { class: 'error', text: reason(err) }), [closeButton])
+    }
+    await refreshDevices()
+    await refreshDriver()
+    renderAll()
+    sync()
+  }
+  dialog({
+    title: vacOut() && vacIn() ? 'Reinstall Vesper Audio Cable' : 'Install Vesper Audio Cable',
+    body: [
+      h('p', { text: 'Vesper Audio Cable is the virtual microphone other apps will hear. It runs on the VB-CABLE driver, which is signed by Microsoft, so Secure Boot and Test Mode stay untouched.' }),
+      steps([
+        'Vesper Audio downloads VB-CABLE from vb-audio.com and checks its hash and Microsoft signature.',
+        'Windows asks for permission, then the VB-Audio installer opens.',
+        'Press Install Driver in that window and accept the VB-Audio licence.',
+        'Vesper Audio renames the devices to Vesper Audio Cable.'
+      ]),
+      h('p', { class: 'muted', text: 'VB-CABLE is donationware by VB-Audio Software (vb-cable.com). Please consider donating to the author.' })
+    ],
+    actions: [
+      {
+        label: 'Later',
+        onClick: async () => {
+          await save({ setupDone: true })
+          closeDialog()
+        }
+      },
+      {
+        label: 'Use fallback driver',
+        onClick: () => {
+          closeDialog()
+          installOwnDriver()
+        }
+      },
+      { label: 'Download and install', primary: true, onClick: run }
+    ]
+  })
+}
+
+async function installOwnDriver() {
   const status = await refreshDriver()
   if (status && status.secureBoot && !status.testSigning) return secureBootDialog()
   const bar = h('i')
@@ -853,7 +959,7 @@ async function installDriver() {
     })
     $('dlg-body').replaceChildren(text, h('div', { class: 'progress' }, bar))
     try {
-      const result = await api.invoke('driver:install')
+      const result = await api.invoke('driver:install', 'own')
       off()
       await save({ setupDone: true })
       text.textContent = 'Checking that Windows started the driver'
@@ -889,8 +995,8 @@ async function installDriver() {
   }
   const note = status && !status.testSigning ? 'The driver is unsigned, so Windows Test Mode is switched on and a restart may be needed.' : 'Windows asks for permission once.'
   dialog({
-    title: vacOut() && vacIn() ? 'Reinstall Vesper Audio Cable' : 'Install Vesper Audio Cable',
-    body: [h('p', { text: 'Vesper Audio Cable is the virtual microphone other apps will hear. It is downloaded from the Vesper Audio release and installed with administrator approval.' }), h('p', { class: 'muted', text: note })],
+    title: 'Install the fallback driver',
+    body: [h('p', { text: 'This is the self-signed Vesper driver. Use it only when VB-CABLE cannot be installed. It is downloaded from the Vesper Audio release and installed with administrator approval.' }), h('p', { class: 'muted', text: note })],
     actions: [
       {
         label: 'Later',
@@ -1018,6 +1124,7 @@ function bindControls() {
   $('set-autostart').addEventListener('change', e => save({ autoStart: e.target.checked }))
   $('set-tray').addEventListener('change', e => save({ closeToTray: e.target.checked }))
   $('set-driver').addEventListener('click', () => installDriver())
+  $('set-own').addEventListener('click', () => installOwnDriver())
   $('set-uninstall').addEventListener('click', () => uninstallDriver())
   $('set-voice').addEventListener('click', async () => {
     const ok = await enroll()
@@ -1046,7 +1153,7 @@ async function boot() {
   bindControls()
   engine.onSoundEnd = () => renderBoard()
   engine.onVoiceState = s => (state.voice = s)
-  if (state.info.testMode) window.__vesper = { engine, state, api, enroll, installDriver, uninstallDriver, save, sync, refreshDevices, config: engineConfig, ensureSpeaker, rebuildPrint, tierOf }
+  if (state.info.testMode) window.__vesper = { engine, state, api, enroll, installDriver, installOwnDriver, uninstallDriver, save, sync, refreshDevices, config: engineConfig, ensureSpeaker, rebuildPrint, tierOf }
   await refreshDevices()
   state.driver = await api.invoke('driver:status').catch(() => null)
   renderAll()

@@ -9,6 +9,13 @@ const winaudio = require('./winaudio')
 
 const REPO = 'AroseEditor/Vesper-Audio'
 const ASSET = 'VesperAudioCable-x64.zip'
+const CABLE = {
+  url: 'https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack45.zip',
+  sha256: 'b950e39f01af1d04ea623c8f6d8eb9b6ea5c477c637295fabf20631c85116bfb',
+  size: 1318877,
+  catalog: 'vbaudio_cable64_win10.cat',
+  setup: 'VBCABLE_Setup_x64.exe'
+}
 const headers = { 'User-Agent': 'vesper-audio', Accept: 'application/vnd.github+json' }
 
 async function findRelease() {
@@ -78,10 +85,45 @@ async function install(emit) {
   }
 }
 
+function brandIcon() {
+  const dir = path.join(process.env.ProgramData || 'C:/ProgramData', 'Vesper Audio')
+  fs.mkdirSync(dir, { recursive: true })
+  const dest = path.join(dir, 'vesper.ico')
+  fs.copyFileSync(path.join(__dirname, 'ui', 'assets', 'vesper.ico'), dest)
+  return dest + ',0'
+}
+
+function brand() {
+  return winaudio.brand(brandIcon())
+}
+
+async function installCable(emit) {
+  const progress = (value, text) => emit({ value, text })
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'vesper-cable-'))
+  try {
+    const label = 'Downloading VB-CABLE from vb-audio.com'
+    progress(0.03, label)
+    const zip = path.join(work, 'VBCABLE_Driver_Pack45.zip')
+    const digest = await download(CABLE.url, zip, CABLE.size, v => progress(v, label))
+    if (digest !== CABLE.sha256) throw new Error('VB-CABLE package checksum mismatch')
+    progress(0.92, 'Unpacking')
+    const dir = path.join(work, 'pkg')
+    await extract(zip, dir)
+    const check = await winaudio.driverVerify(path.join(dir, CABLE.catalog))
+    if (!check.microsoft) throw new Error('VB-CABLE package is not signed by Microsoft')
+    progress(0.96, 'Waiting for the VB-Audio installer')
+    await winaudio.runSetup(path.join(dir, CABLE.setup))
+    progress(1, 'Installer closed')
+    return { ok: true }
+  } finally {
+    fs.rm(work, { recursive: true, force: true }, () => {})
+  }
+}
+
 async function uninstall() {
   const result = await winaudio.driverUninstall()
   if (result.ok) require('./store').set({ driverVersion: null })
   return result
 }
 
-module.exports = { status, install, uninstall }
+module.exports = { status, install, installCable, brand, uninstall }

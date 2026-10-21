@@ -52,6 +52,17 @@ function runElevated(args, timeout = 300000) {
   })
 }
 
+function runSetup(exe) {
+  const quote = a => `'${String(a).replace(/'/g, "''")}'`
+  const script = `Start-Process -FilePath ${quote(exe)} -WorkingDirectory ${quote(path.dirname(exe))} -Verb RunAs -Wait`
+  return new Promise((resolve, reject) => {
+    execFile('powershell.exe', ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script], { windowsHide: true, timeout: 1800000 }, (err, _o, stderr) => {
+      if (!err) return resolve()
+      reject(new Error(/cancel/i.test(stderr || '') ? 'Administrator approval was declined' : (stderr || err.message).trim()))
+    })
+  })
+}
+
 module.exports = {
   helperPath,
   list: () => run(['list']),
@@ -61,6 +72,9 @@ module.exports = {
   setSysFx: (id, on) => run(['sysfx', id, on ? '1' : '0']),
   gpus: () => run(['gpus']),
   driverStatus: () => run(['driver-status']),
+  driverVerify: file => run(['driver-verify', file]),
+  brand: icon => run(['brand', icon]).catch(() => runElevated(['brand', icon])),
+  runSetup,
   driverInstall: dir => runElevated(['driver-install', dir]),
   driverUninstall: () => runElevated(['driver-uninstall'])
 }

@@ -11,6 +11,7 @@ const invokes = new Set([
   'system:gpus',
   'driver:status',
   'driver:install',
+  'driver:brand',
   'driver:uninstall',
   'sounds:add',
   'sounds:remove',

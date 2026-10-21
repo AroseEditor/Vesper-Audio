@@ -10,6 +10,7 @@ use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 use windows::Win32::Media::Audio::*;
 use windows::Win32::System::Com::StructuredStorage::{PropVariantToBoolean, PropVariantToStringAlloc, PropVariantToUInt32, PROPVARIANT};
 use windows::Win32::System::Com::*;
+use windows::Win32::System::Variant::VT_LPWSTR;
 use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
 
 const KEY_DEVICE_FORMAT: PROPERTYKEY = PROPERTYKEY { fmtid: GUID::from_u128(0xf19f064d_082c_4e27_bc73_6882a1bb8e4c), pid: 0 };
@@ -106,6 +107,17 @@ fn format_of(store: &IPropertyStore) -> Value {
     }
 }
 
+fn cable_kind(name: &str) -> &'static str {
+    let lower = name.to_lowercase();
+    if lower.contains("vesper audio cable") {
+        "vesper"
+    } else if lower.starts_with("cable input") || lower.starts_with("cable output") || (lower.contains("vb-audio") && lower.contains("cable")) {
+        "vb"
+    } else {
+        ""
+    }
+}
+
 fn describe(d: &IMMDevice, flow: &str, def: &str, defc: &str) -> Value {
     let id = device_id(d);
     let store = unsafe { d.OpenPropertyStore(STGM_READ).ok() };
@@ -123,6 +135,7 @@ fn describe(d: &IMMDevice, flow: &str, def: &str, defc: &str) -> Value {
             Err(_) => (None, None),
         }
     };
+    let cable = cable_kind(&name);
     let mut o = json!({
         "id": id,
         "name": name,
@@ -132,7 +145,8 @@ fn describe(d: &IMMDevice, flow: &str, def: &str, defc: &str) -> Value {
         "format": format,
         "volume": volume,
         "muted": muted,
-        "vac": name.to_lowercase().contains("vesper audio cable"),
+        "vac": !cable.is_empty(),
+        "cable": cable,
     });
     o["sysfx"] = json!(sysfx_enabled(&id));
     if let Some(s) = store.as_ref() {
@@ -209,3 +223,57 @@ pub fn set_sysfx(id: &str, on: bool) -> Result<Value, String> {
         _ => Err("Windows did not apply the audio enhancements change".into()),
     }
 }
+
+const KEY_DEVICE_DESC: PROPERTYKEY = PROPERTYKEY { fmtid: GUID::from_u128(0xa45c254e_df1c_4efd_8020_67d146a850e0), pid: 2 };
+const KEY_FRIENDLY_NAME: PROPERTYKEY = PROPERTYKEY { fmtid: GUID::from_u128(0xa45c254e_df1c_4efd_8020_67d146a850e0), pid: 14 };
+const KEY_ADAPTER_NAME: PROPERTYKEY = PROPERTYKEY { fmtid: GUID::from_u128(0xb3f8fa53_0004_438e_9003_51a46e139bfc), pid: 6 };
+const KEY_ICON_PATH: PROPERTYKEY = PROPERTYKEY { fmtid: GUID::from_u128(0x259abffc_50a7_47ce_af08_68c9a7d73366), pid: 12 };
+
+fn policy_text(id: &str, key: &PROPERTYKEY, value: &str) -> Result<(), String> {
+    let p = policy()?;
+    let w = wide(id);
+    let text = wide(value);
+    let mut pv = PROPVARIANT::default();
+    unsafe {
+        let mem = CoTaskMemAlloc(text.len() * 2) as *mut u16;
+        std::ptr::copy_nonoverlapping(text.as_ptr(), mem, text.len());
+        let inner = &mut *pv.Anonymous.Anonymous;
+        inner.vt = VT_LPWSTR;
+        inner.Anonymous.pwszVal = PWSTR(mem);
+    }
+    unsafe { p.SetPropertyValue(PCWSTR(w.as_ptr()), BOOL(0), key, &mut pv) }.ok().map_err(|e| e.message())
+}
+
+pub fn rename(id: &str, name: &str, adapter: &str, icon: &str) -> Result<Value, String> {
+    policy_text(id, &KEY_DEVICE_DESC, name)?;
+    if !adapter.is_empty() {
+        policy_text(id, &KEY_ADAPTER_NAME, adapter)?;
+        policy_text(id, &KEY_FRIENDLY_NAME, &format!("{name} ({adapter})"))?;
+    } else {
+        policy_text(id, &KEY_FRIENDLY_NAME, name)?;
+    }
+    if !icon.is_empty() {
+        policy_text(id, &KEY_ICON_PATH, icon)?;
+    }
+    Ok(json!({ "ok": true }))
+}
+
+pub fn brand(icon: &str) -> Result<Value, String> {
+    let en = enumerator()?;
+    let mut renamed = 0;
+    for flow in [eCapture, eRender] {
+        let coll = unsafe { en.EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE).map_err(|e| e.message())? };
+        let n = unsafe { coll.GetCount().map_err(|e| e.message())? };
+        for i in 0..n {
+            let Ok(d) = (unsafe { coll.Item(i) }) else { continue };
+            let Ok(store) = (unsafe { d.OpenPropertyStore(STGM_READ) }) else { continue };
+            let name = prop_string(&store, &PKEY_Device_FriendlyName).unwrap_or_default();
+            if cable_kind(&name) == "vb" {
+                rename(&device_id(&d), "Vesper Audio Cable", "Vesper Audio", icon)?;
+                renamed += 1;
+            }
+        }
+    }
+    Ok(json!({ "ok": true, "renamed": renamed }))
+}
+

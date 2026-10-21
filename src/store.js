@@ -15,6 +15,8 @@ const defaults = {
   basic: false,
   basicPreset: 'rnnoise',
   speexDb: -30,
+  voiceSensitivity: 'balanced',
+  cableOwned: false,
   gains: {},
   boardVolume: 100,
   sounds: [],

@@ -8,6 +8,7 @@ use windows::Win32::Devices::DeviceAndDriverInstallation::*;
 use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD};
 
 const HWID: &str = "ROOT\\VesperAudioCable";
+const VB_HWID: &str = "VBAudioVACWDM";
 const INF_NAME: &str = "VesperAudioCable.inf";
 const CER_NAME: &str = "VesperAudioCable.cer";
 const CLASS_MEDIA: GUID = GUID::from_u128(0x4d36e96c_e325_11ce_bfc1_08002be10318);
@@ -72,7 +73,7 @@ impl Drop for Nodes {
     }
 }
 
-fn nodes() -> Result<Nodes, String> {
+fn nodes(hwid: &str) -> Result<Nodes, String> {
     unsafe {
         let enumerator = wide("ROOT");
         let set = SetupDiGetClassDevsW(None, PCWSTR(enumerator.as_ptr()), None, DIGCF_ALLCLASSES | DIGCF_PRESENT)
@@ -96,7 +97,7 @@ fn nodes() -> Result<Nodes, String> {
                 .collect();
             let hit = units
                 .split(|u| *u == 0)
-                .any(|id| String::from_utf16_lossy(id).eq_ignore_ascii_case(HWID));
+                .any(|id| String::from_utf16_lossy(id).eq_ignore_ascii_case(hwid));
             if hit {
                 let mut status = CM_DEVNODE_STATUS_FLAGS(0);
                 let mut problem = CM_PROB(0);
@@ -109,13 +110,17 @@ fn nodes() -> Result<Nodes, String> {
 }
 
 pub fn status() -> Result<Value, String> {
-    let n = nodes()?;
+    let n = nodes(HWID)?;
+    let vb = nodes(VB_HWID)?;
     let problem = n.found.first().map(|(_, p)| *p);
+    let vb_problem = vb.found.first().map(|(_, p)| *p);
     Ok(json!({
         "ok": true,
         "nodePresent": !n.found.is_empty(),
         "problem": problem,
         "running": problem == Some(0),
+        "vbPresent": !vb.found.is_empty(),
+        "vbRunning": vb_problem == Some(0),
         "testSigning": test_signing(),
         "secureBoot": secure_boot(),
     }))
@@ -167,7 +172,7 @@ pub fn install(dir: &str) -> Result<Value, String> {
         }
         reboot = true;
     }
-    if nodes()?.found.is_empty() {
+    if nodes(HWID)?.found.is_empty() {
         create_node()?;
     }
     let inf_w = wide(&inf.to_string_lossy());
@@ -179,7 +184,7 @@ pub fn install(dir: &str) -> Result<Value, String> {
     if let Err(e) = update {
         return Err(format!("driver install failed: {}", e.message()));
     }
-    let after = nodes()?;
+    let after = nodes(HWID)?;
     let problem = after.found.first().map(|(_, p)| *p);
     let running = problem == Some(0);
     Ok(json!({
@@ -190,14 +195,14 @@ pub fn install(dir: &str) -> Result<Value, String> {
     }))
 }
 
-fn published_inf() -> Option<String> {
+fn published_inf(marker: &str) -> Option<String> {
     let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
     for entry in std::fs::read_dir(Path::new(&root).join("INF")).ok()?.flatten() {
         let name = entry.file_name().to_string_lossy().to_lowercase();
         if name.starts_with("oem") && name.ends_with(".inf") {
             if let Ok(bytes) = std::fs::read(entry.path()) {
                 let text = String::from_utf8_lossy(&bytes).to_lowercase().replace('\0', "");
-                if text.contains("vesperaudiocable") {
+                if text.contains(marker) {
                     return Some(name);
                 }
             }
@@ -207,17 +212,36 @@ fn published_inf() -> Option<String> {
 }
 
 pub fn uninstall() -> Result<Value, String> {
-    let n = nodes()?;
-    for (info, _) in &n.found {
-        unsafe {
-            SetupDiCallClassInstaller(DIF_REMOVE, n.set, Some(info)).map_err(|e| e.message())?;
+    for (hwid, marker) in [(HWID, "vesperaudiocable"), (VB_HWID, "vbaudiovacwdm")] {
+        let n = nodes(hwid)?;
+        for (info, _) in &n.found {
+            unsafe {
+                SetupDiCallClassInstaller(DIF_REMOVE, n.set, Some(info)).map_err(|e| e.message())?;
+            }
         }
-    }
-    if let Some(oem) = published_inf() {
-        let (ok, text) = exec("pnputil.exe", &["/delete-driver", &oem, "/uninstall", "/force"]);
-        if !ok {
-            return Err(format!("driver removal failed: {}", text.trim()));
+        while let Some(oem) = published_inf(marker) {
+            let (ok, text) = exec("pnputil.exe", &["/delete-driver", &oem, "/uninstall", "/force"]);
+            if !ok {
+                return Err(format!("driver removal failed: {}", text.trim()));
+            }
         }
     }
     Ok(json!({ "ok": true }))
+}
+
+pub fn verify(file: &str) -> Result<Value, String> {
+    let script = format!(
+        "$s = Get-AuthenticodeSignature -LiteralPath '{}'; $o = @{{ status = $s.Status.ToString() }}; if ($s.SignerCertificate) {{ $o.subject = $s.SignerCertificate.Subject; $o.issuer = $s.SignerCertificate.Issuer }}; $o | ConvertTo-Json -Compress",
+        file.replace('\'', "''")
+    );
+    let (ok, text) = exec("powershell.exe", &["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &script]);
+    if !ok {
+        return Err(format!("signature check failed: {}", text.trim()));
+    }
+    let info: Value = serde_json::from_str(text.trim()).map_err(|e| e.to_string())?;
+    let status = info["status"].as_str().unwrap_or("");
+    let subject = info["subject"].as_str().unwrap_or("");
+    let issuer = info["issuer"].as_str().unwrap_or("");
+    let microsoft = status == "Valid" && subject.contains("Microsoft Windows Hardware Compatibility Publisher") && issuer.contains("Microsoft");
+    Ok(json!({ "ok": true, "status": status, "subject": subject, "issuer": issuer, "microsoft": microsoft }))
 }

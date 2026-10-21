@@ -34,7 +34,7 @@ mic ──> gain ──> AI denoise ──> voice lock ──> limiter ──> V
 5. [Features](#features)
 6. [AI noise cancellation](#ai-noise-cancellation)
 7. [Benchmarks](#benchmarks)
-8. [Vesper Audio Cable driver](#vesper-audio-cable-driver)
+8. [Vesper Audio Cable](#vesper-audio-cable)
 9. [Real Windows properties](#real-windows-properties)
 10. [Architecture](#architecture)
 11. [Build from source](#build-from-source)
@@ -52,8 +52,8 @@ mic ──> gain ──> AI denoise ──> voice lock ──> limiter ──> V
 | Part | What it does |
 | --- | --- |
 | **Vesper Audio** (Electron app) | Captures your real microphone, cleans it, mixes in the soundboard, and plays the result into the virtual cable. Lives in the system tray. |
-| **Vesper Audio Cable** (WDM driver) | A virtual speaker and a virtual microphone joined by a kernel loopback ring. Anything written to the speaker comes out of the microphone. Other apps pick the microphone. |
-| **vesper-helper.exe** (Rust) | Talks to Windows: lists endpoints, reads and writes the real Sound control panel properties, detects GPUs, installs and removes the driver. |
+| **Vesper Audio Cable** (virtual microphone) | A virtual speaker and a virtual microphone joined by a loopback. Anything written to the speaker comes out of the microphone. Other apps pick the microphone. It runs on the Microsoft-signed [VB-CABLE](https://vb-audio.com/Cable/) driver, renamed and given the Vesper icon, so Secure Boot stays on. A self-signed Vesper driver is kept as an advanced fallback. |
+| **vesper-helper.exe** (Rust) | Talks to Windows: lists endpoints, reads and writes the real Sound control panel properties, renames and re-icons the cable endpoints, detects GPUs, verifies driver signatures, installs and removes drivers. |
 | **AI models** | DeepFilterNet3 (built in), DPDFNet, and WeSpeaker speaker verification. Downloaded once, executed locally. Nothing leaves the PC. |
 
 ---
@@ -75,7 +75,7 @@ mic ──> gain ──> AI denoise ──> voice lock ──> limiter ──> V
   </tr>
   <tr>
     <td><img src="docs/presets.png" alt="Presets"><br><sub>AI presets</sub></td>
-    <td><img src="docs/secure-boot-steps.png" alt="Secure Boot steps"><br><sub>Exact steps when Secure Boot blocks the driver</sub></td>
+    <td><img src="docs/install-cable.png" alt="Install Vesper Audio Cable"><br><sub>Install Vesper Audio Cable on the Microsoft-signed VB-CABLE driver</sub></td>
   </tr>
 </table>
 
@@ -89,8 +89,8 @@ Download from the [latest release](https://github.com/AroseEditor/Vesper-Audio/r
 | --- | --- |
 | `Vesper-Audio-Setup-<version>.exe` | NSIS installer. Per-user, no admin needed for the app itself. |
 | `Vesper-Audio-<version>-portable.exe` | Single file, no install. |
-| `VesperAudioCable-x64.zip` + `.sha256` | The driver package. The app downloads and verifies it for you. |
-| `VesperAudioCable.cer` | Public half of the shared driver signing certificate. |
+| `VesperAudioCable-x64.zip` + `.sha256` | The fallback driver package. Only used when VB-CABLE cannot be installed. The app downloads and verifies it. |
+| `VesperAudioCable.cer` | Public half of the fallback driver signing certificate. |
 
 Requirements: Windows 10 1903+ or Windows 11, x64. A microphone. Heavy mode additionally needs an NVIDIA GPU with more than 2 GB of VRAM.
 
@@ -100,11 +100,10 @@ The executables are not Authenticode signed, so SmartScreen may warn on first la
 
 ## Quick start
 
-1. Run the app. First launch offers to install **Vesper Audio Cable**. Approve the Windows prompt once.
-2. If Windows reports that **Secure Boot** is on, the app shows the exact firmware steps. The driver is unsigned for Microsoft, so Windows needs Test Mode, and Test Mode needs Secure Boot off. See [the driver section](#vesper-audio-cable-driver).
-3. On **Home** pick your microphone, tick **AI Noise Cancellation**, read the paragraph once when asked.
-4. In Discord, OBS, Zoom or a game choose **Vesper Audio Cable** as the microphone.
-5. Tick **Test and Hear Yourself** to listen to what others hear.
+1. Run the app. First launch offers to install **Vesper Audio Cable**. The app downloads VB-CABLE from vb-audio.com, checks its SHA-256 and Microsoft signature, then asks Windows for permission and opens the VB-Audio installer. Press **Install Driver** there. The app renames the devices to Vesper Audio Cable. Secure Boot and Test Mode are not touched.
+2. On **Home** pick your microphone, tick **AI Noise Cancellation**, read the paragraph once when asked.
+3. In Discord, OBS, Zoom or a game choose **Vesper Audio Cable** as the microphone.
+4. Tick **Test and Hear Yourself** to listen to what others hear.
 
 Closing the window sends the app to the tray. Left click the tray icon to open it, right click for **Exit**.
 
@@ -118,7 +117,7 @@ Closing the window sends the app to the tray. Left click the tray icon to open i
 | Properties | Format (rate, bits, channels), Levels, Listen to this device, Audio enhancements. All read and written on the real endpoint. |
 | Custom Audio Gain | 0 to 400 percent software gain per microphone, saved per device. |
 | AI Noise Cancellation | Presets **Custom**, **Custom Heavy**, **ClearCast**. See below. |
-| Basic Noise Cancellation | **Speex** (low CPU usage, low quality) with Suppression Level -60 dB to 0 dB, and **RNNoise** (good quality, more CPU usage). Same two methods as the OBS noise suppression filter. Cannot be ticked while AI is on. |
+| Basic Noise Cancellation | **Speex** (low CPU usage, low quality) with Suppression Level -60 dB to 0 dB, and **RNNoise** (good quality, more CPU usage). Built from OBS Studio's `noise-suppress-filter.c`: 10 ms frames (480 samples at 48 kHz), Speex through `speex_preprocess_state_init` with `SPEEX_PREPROCESS_SET_NOISE_SUPPRESS` set to the slider dB (default -30), RNNoise on 480-sample frames scaled by 32768, and no makeup gain. Cannot be ticked while AI is on. |
 | Test and Hear Yourself | Plays the processed microphone to your chosen output for as long as it is ticked. |
 | Soundboard | Local MP3 files, maximum 40. Played through the virtual microphone and your headphones. Mix with your voice. |
 | Voice enrollment | Start and Stop, English and Hindi paragraphs, laugh prompt, optional add-a-second-language. |
@@ -225,40 +224,52 @@ Pick **Basic Noise Cancellation** when latency matters more than quality.
 
 ---
 
-## Vesper Audio Cable driver
+## Vesper Audio Cable
 
-A fork of [VirtualDrivers/Virtual-Audio-Driver](https://github.com/VirtualDrivers/Virtual-Audio-Driver) (MIT, itself derived from Microsoft's SysVAD sample), renamed and extended with a loopback.
+### Default: VB-CABLE, signed by Microsoft
+
+| Property | Value |
+| --- | --- |
+| Driver | VB-CABLE Driver Pack 45 by VB-Audio Software, donationware, [vb-cable.com](https://vb-audio.com/Cable/) |
+| Signature | catalog and `.sys` signed by `Microsoft Windows Hardware Compatibility Publisher`, so it loads with Secure Boot on and without Test Mode |
+| Hardware ID | `VBAudioVACWDM` |
+| Source | `https://download.vb-audio.com/Download_CABLE/VBCABLE_Driver_Pack45.zip`, pinned SHA-256 `b950e39f01af1d04ea623c8f6d8eb9b6ea5c477c637295fabf20631c85116bfb` |
+| Checks | hash must match, then `Get-AuthenticodeSignature` on the catalog must report a valid Microsoft signature, otherwise nothing is run |
+| Install | the app launches the official `VBCABLE_Setup_x64.exe` with administrator approval and VB-Audio's own window and licence. You press **Install Driver** |
+| Branding | after install the helper rewrites the endpoint properties in the Windows property store (`DeviceDesc`, adapter name, friendly name, icon) to **Vesper Audio Cable** with the Vesper icon. The driver package is never modified. It is re-applied on launch if Windows restores the original names |
+
+Why the install is not silent and the package is not in this repository: the VB-CABLE licence allows copying the package as is, and does not allow integrating it into another software's installation procedure without the author's agreement. The app therefore downloads the official package, shows VB-Audio's installer, and leaves the licence acceptance to you. Device Manager and the Apps list still show VB-Audio because the signed package cannot be edited without breaking its signature. If you use the cable, please [donate to VB-Audio](https://vb-audio.com/Cable/).
+
+| State | App behavior |
+| --- | --- |
+| Endpoints present | Nothing to do, no banner. |
+| Cable devices named `CABLE Input` or `CABLE Output` | Renamed to Vesper Audio Cable with the Vesper icon. |
+| VB-Audio installer closed, devices not there yet | Offers a 15 second restart you can cancel. |
+| Driver installed but no endpoints | Banner **Repair** runs setup again. |
+
+### Fallback: the Vesper driver
+
+For the rare PC where VB-CABLE cannot be used. **Settings, Fallback driver** or **Use fallback driver** in the install window. It is a fork of [VirtualDrivers/Virtual-Audio-Driver](https://github.com/VirtualDrivers/Virtual-Audio-Driver) (MIT, derived from Microsoft's SysVAD sample), renamed and extended with a loopback.
 
 | Property | Value |
 | --- | --- |
 | Hardware ID | `ROOT\VesperAudioCable` |
-| Endpoints | speaker `... (Vesper Audio Cable)` and microphone `... (Vesper Audio Cable)` |
 | Format | fixed 48 kHz, 16-bit PCM, stereo on both endpoints (so the ring never converts) |
 | Loopback | render stream `ReadBytes` writes into a 256 KB spin-locked ring, capture stream `WriteBytes` reads from it |
 | Latency | primes at 20 ms, trims to 20 ms above 120 ms, discards when nobody is recording for 500 ms |
 | Package | `.sys` (about 64 KB), `.inf`, `.cat`, `.cer`, built on GitHub Actions with the WDK |
 
-### Signing and the "allow" prompt
-
-There is no Microsoft attestation signature. The driver is signed with one shared self-signed certificate:
-
-* Subject `CN=Vesper Audio, O=Vesper Audio`, thumbprint `8F4206F58271F2A11BD13C374636B122569AA265`, valid 25 years.
-* The private key exists only as the GitHub Actions secrets `VAC_SIGN_PFX` and `VAC_SIGN_PASSWORD`. The public `driver/VesperAudioCable.cer` is committed and shipped in every package.
-* The installer imports the certificate into **Trusted Root** and **Trusted Publishers**. Windows then shows only its normal administrator prompt.
-
-### Secure Boot and Test Mode
-
-A kernel driver that Microsoft did not sign only loads in **Test Mode**, and Windows refuses to enable Test Mode while **Secure Boot** is on. The app detects each state and does not ask for a restart unless one is really needed.
+There is no Microsoft attestation signature for it. It is signed with one shared self-signed certificate (subject `CN=Vesper Audio, O=Vesper Audio`, thumbprint `8F4206F58271F2A11BD13C374636B122569AA265`, private key only in the GitHub Actions secrets `VAC_SIGN_PFX` and `VAC_SIGN_PASSWORD`). The installer imports the public certificate into **Trusted Root** and **Trusted Publishers**. Windows loads an unsigned-by-Microsoft kernel driver only in **Test Mode**, and Test Mode needs **Secure Boot** off, so this path alone needs firmware changes:
 
 | State | App behavior |
 | --- | --- |
-| Endpoints present | Nothing to do, no banner. |
-| Secure Boot on, Test Mode off | Banner **Show steps**: Settings, System, Recovery, Advanced startup, Restart now, Troubleshoot, Advanced options, UEFI Firmware Settings, set Secure Boot to Disabled, then Install again. Button to open the recovery page and a recheck button. |
-| Test Mode just switched on | Install succeeded, restart required. Offers a 15 second restart you can cancel. |
-| Driver running right after install | Reports success. No restart. |
+| Secure Boot on, Test Mode off | Dialog with the exact steps: Settings, System, Recovery, Advanced startup, Restart now, Troubleshoot, Advanced options, UEFI Firmware Settings, set Secure Boot to Disabled, then Install again. Button to open the recovery page and a recheck button. |
+| Test Mode just switched on | Install succeeded, restart required. |
 | Device present with a problem code | Shows the code and next steps. |
 
-Kernel anti-cheat games (Vanguard, FACEIT and similar) may refuse to run while Secure Boot is off. Re-enable it when you are not using the cable. **Settings** has Re-init and Uninstall.
+<img src="docs/secure-boot-steps.png" alt="Secure Boot steps for the fallback driver" width="520">
+
+Kernel anti-cheat games (Vanguard, FACEIT and similar) may refuse to run while Secure Boot is off. **Settings** has Uninstall for either driver.
 
 ---
 
@@ -354,7 +365,7 @@ Manual runs (`workflow_dispatch`) take `target` (`all`, `driver`, `app`) and `pu
 
 ## Data and privacy
 
-Everything runs on your PC. The only network traffic is downloads: the driver package, models, and the release lookup. No telemetry.
+Everything runs on your PC. The only network traffic is downloads: the VB-CABLE package from vb-audio.com, the fallback driver, models, and the release lookup. No telemetry.
 
 | Path (`%APPDATA%\Vesper Audio`) | Content |
 | --- | --- |
@@ -371,9 +382,9 @@ Delete `voice/` and `settings.json` to forget your voice.
 
 | Symptom | Cause and fix |
 | --- | --- |
-| Vesper Audio Cable not in other apps | Check the banner on Home. Secure Boot on: follow **Show steps**. Restart needed: press **Restart**. |
-| Device problem code 52 | Windows rejected the signature. Test Mode must be on and Secure Boot off. |
-| Banner says code 10, 31, 37 or 39 | Press **Fix** or Settings, **Re-init and Setup**. |
+| Vesper Audio Cable not in other apps | Check the banner on Home. Install not finished: press **Install**. Restart needed: press **Restart**. |
+| Fallback driver, problem code 52 | Windows rejected the self-signed driver. Test Mode must be on and Secure Boot off, or use the default VB-CABLE driver. |
+| Banner says code 10, 31, 37 or 39 | Press **Fix**, or Settings, **Re-init and Setup**. |
 | Other apps hear nothing | Pick **Vesper Audio Cable** as the microphone in that app, and check the Home level meter moves. |
 | "Using the built-in light model" | The main model is still downloading, you are offline, or the CPU could not keep up. |
 | Custom Heavy says restart | Windows must run the app on the NVIDIA GPU. Press **Restart now** once. |
@@ -385,7 +396,7 @@ Delete `voice/` and `settings.json` to forget your voice.
 ## Honest limits
 
 * The models are open source and were not trained by this project. The pipeline around them (enrollment, held-out threshold, gate, mixing, fallbacks) is this project's work. There is **no head-to-head claim against NVIDIA Broadcast or any commercial product**. The benchmark compares open models.
-* The kernel loopback compiles and is signed by CI. The author's PC has Secure Boot on, so the driver has not been exercised on that machine. Treat the first install as a test and report problems.
+* There is no Microsoft-signed Vesper driver. The default cable is VB-CABLE, which is signed by Microsoft and downloaded from VB-Audio. The Vesper kernel loopback compiles and is signed by CI with a self-signed certificate, and has not been exercised on the author's PC (Secure Boot on). Treat it as a fallback and report problems.
 * Custom needs about one second of speech to decide, so the very start of someone else's sentence can leak, and a very short utterance may be judged late.
 * Fixed 48 kHz 16-bit stereo. Apps that force exclusive mode with another format cannot open the cable.
 * Heavy relies on WebGPU, which Chromium exposes on supported drivers.
@@ -420,6 +431,7 @@ This project: MIT (see [LICENSE](LICENSE)). Developed by Ayush.ue5.
 | WeSpeaker and 3D-Speaker models, sherpa-onnx releases | Apache-2.0 |
 | @sapphi-red/web-noise-suppressor, RNNoise, SpeexDSP | MIT, BSD-3-Clause |
 | Virtual-Audio-Driver (MikeTheTech) | MIT |
+| VB-CABLE | VB-Audio Software, donationware, downloaded from vb-audio.com at install time and never redistributed here |
 | Microsoft SysVAD sample | MS-PL |
 | Inter font | OFL-1.1 |
 | Lucide icons | ISC |

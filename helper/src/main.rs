@@ -24,9 +24,12 @@ fn run(args: &[String]) -> Result<Value, String> {
         "mute" => audio::set_mute(need(args, 1)?, need(args, 2)? == "1"),
         "listen" => audio::set_listen(need(args, 1)?, need(args, 2)? == "1"),
         "sysfx" => audio::set_sysfx(need(args, 1)?, need(args, 2)? == "1"),
+        "rename" => audio::rename(need(args, 1)?, need(args, 2)?, args.get(3).map(|s| s.as_str()).unwrap_or(""), args.get(4).map(|s| s.as_str()).unwrap_or("")),
+        "brand" => audio::brand(args.get(1).map(|s| s.as_str()).unwrap_or("")),
         "gpus" => gpu::list(),
         "driver-status" => driver::status(),
         "driver-install" => driver::install(need(args, 1)?),
+        "driver-verify" => driver::verify(need(args, 1)?),
         "driver-uninstall" => driver::uninstall(),
         other => Err(format!("unknown command {other}")),
     }

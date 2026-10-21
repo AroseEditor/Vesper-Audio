@@ -120,7 +120,8 @@ function handleIpc() {
   ipcMain.handle('device:sysfx', (_, id, on) => winaudio.setSysFx(id, on))
   ipcMain.handle('system:gpus', () => winaudio.gpus())
   ipcMain.handle('driver:status', () => driver.status())
-  ipcMain.handle('driver:install', () => driver.install(p => win && win.webContents.send('driver:progress', p)))
+  ipcMain.handle('driver:install', (_, kind) => driver[kind === 'own' ? 'install' : 'installCable'](p => win && win.webContents.send('driver:progress', p)))
+  ipcMain.handle('driver:brand', () => driver.brand())
   ipcMain.handle('driver:uninstall', () => driver.uninstall())
   ipcMain.handle('model:ensure', (_, name) => models.ensure(name, p => win && win.webContents.send('model:progress', p)))
   ipcMain.handle('sounds:add', async () => {
