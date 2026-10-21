@@ -29,6 +29,7 @@ const state = {
   speakers: {},
   speakerLoading: {},
   gpus: [],
+  devicesKey: '',
   heavyUrl: '',
   notices: {},
   info: { version: '', testMode: false },
@@ -456,13 +457,18 @@ function renderDriverNotice() {
 }
 
 async function refreshDevices() {
+  let next
   try {
-    state.devices = await api.invoke('devices:list')
+    next = await api.invoke('devices:list')
   } catch (err) {
     notice('devices', { text: 'Could not read Windows audio devices: ' + err.message })
     return
   }
   notice('devices', null)
+  const key = JSON.stringify(next)
+  if (key === state.devicesKey) return
+  state.devicesKey = key
+  state.devices = next
   renderAll()
 }
 
@@ -482,7 +488,11 @@ function bindMenus() {
   }
   document.addEventListener('click', closeMenus)
   document.addEventListener('keydown', e => {
-    if (e.key === 'Escape') closeMenus()
+    if (e.key !== 'Escape') return
+    closeMenus()
+    if ($('overlay').hidden) return
+    const dismiss = $('dlg-actions').firstElementChild
+    if (dismiss && !dismiss.classList.contains('primary')) dismiss.click()
   })
 }
 
@@ -762,6 +772,39 @@ function restartDialog() {
   })
 }
 
+async function uninstallDriver() {
+  const closeButton = h('button', { class: 'btn primary', type: 'button', text: 'Close', onclick: closeDialog })
+  dialog({
+    title: 'Uninstall Vesper Audio Cable',
+    body: [h('p', { text: 'This removes the virtual microphone and its driver from Windows. Windows asks for permission once. You can install it again at any time.' })],
+    actions: [
+      { label: 'Cancel', onClick: closeDialog },
+      {
+        label: 'Uninstall',
+        primary: true,
+        onClick: async () => {
+          $('dlg-actions').replaceChildren()
+          $('dlg-body').replaceChildren(h('p', { class: 'muted', text: 'Removing the driver' }))
+          try {
+            await api.invoke('driver:uninstall')
+            await save({ pendingReboot: 0 })
+            $('dlg-title').textContent = 'Vesper Audio Cable removed'
+            $('dlg-body').replaceChildren(h('p', { text: 'The virtual microphone is no longer installed.' }))
+          } catch (err) {
+            $('dlg-title').textContent = 'Could not remove the driver'
+            $('dlg-body').replaceChildren(h('p', { class: 'error', text: err.message }))
+          }
+          $('dlg-actions').replaceChildren(closeButton)
+          await refreshDevices()
+          await refreshDriver()
+          renderAll()
+          sync()
+        }
+      }
+    ]
+  })
+}
+
 const PROBLEMS = {
   52: 'Windows could not verify the driver signature. Test Mode must be on and Secure Boot off.',
   10: 'The driver could not start.',
@@ -954,6 +997,7 @@ function bindControls() {
   $('set-autostart').addEventListener('change', e => save({ autoStart: e.target.checked }))
   $('set-tray').addEventListener('change', e => save({ closeToTray: e.target.checked }))
   $('set-driver').addEventListener('click', () => installDriver())
+  $('set-uninstall').addEventListener('click', () => uninstallDriver())
   $('set-voice').addEventListener('click', async () => {
     const ok = await enroll()
     if (ok) renderAll()
@@ -980,7 +1024,7 @@ async function boot() {
   bindControls()
   engine.onSoundEnd = () => renderBoard()
   engine.onVoiceState = s => (state.voice = s)
-  if (state.info.testMode) window.__vesper = { engine, state, api, enroll, installDriver, save, sync, refreshDevices, config: engineConfig, ensureSpeaker, rebuildPrint, tierOf }
+  if (state.info.testMode) window.__vesper = { engine, state, api, enroll, installDriver, uninstallDriver, save, sync, refreshDevices, config: engineConfig, ensureSpeaker, rebuildPrint, tierOf }
   await refreshDevices()
   state.driver = await api.invoke('driver:status').catch(() => null)
   renderAll()
@@ -994,7 +1038,10 @@ async function boot() {
     if (!document.hidden) refreshDevices()
   }, 4000)
   api.on('app:shown', refreshDevices)
-  if (!state.settings.setupDone && !(vacOut() && vacIn())) installDriver()
+  if (!state.settings.setupDone && !(vacOut() && vacIn())) {
+    await save({ setupDone: true })
+    installDriver()
+  }
 }
 
 boot().catch(err => {

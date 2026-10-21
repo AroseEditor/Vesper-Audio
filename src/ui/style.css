@@ -303,3 +303,10 @@ input[type="range"]:disabled { opacity: 0.4; cursor: not-allowed; }
 .inline-check { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); cursor: pointer; }
 .steps { margin: 0 0 12px; padding-left: 22px; }
 .steps li { margin: 6px 0; }
+
+.btn-group { display: inline-flex; gap: 10px; }
+.check input:focus-visible + .box, .switch input:focus-visible + .track { outline: 2px solid var(--accent); outline-offset: 3px; }
+::-webkit-scrollbar { width: 12px; height: 12px; }
+::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.16); border-radius: 999px; border: 3px solid var(--bg); }
+::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.28); }
+::-webkit-scrollbar-track { background: transparent; }
