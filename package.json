@@ -1,7 +1,8 @@
 {
   "name": "vesper-audio",
-  "version": "0.1.0",
-  "description": "Vesper Audio",
+  "productName": "Vesper Audio",
+  "version": "1.0.0",
+  "description": "Virtual microphone, local AI noise cancellation and soundboard for Windows",
   "main": "src/main.js",
   "author": "Ayush.ue5",
   "license": "MIT",
@@ -57,6 +58,15 @@
     },
     "portable": {
       "artifactName": "Vesper-Audio-${version}-portable.${ext}"
-    }
+    },
+    "electronLanguages": [
+      "en-US"
+    ],
+    "compression": "maximum"
+  },
+  "homepage": "https://github.com/AroseEditor/Vesper-Audio",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/AroseEditor/Vesper-Audio.git"
   }
 }
