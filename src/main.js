@@ -1,5 +1,7 @@
 const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, session, shell, dialog, protocol, net } = require('electron')
 const path = require('path')
+const os = require('os')
+const { execFile } = require('child_process')
 const fs = require('fs')
 const crypto = require('crypto')
 const { pathToFileURL } = require('url')
@@ -18,6 +20,8 @@ protocol.registerSchemesAsPrivileged([
 
 if (testMode && process.env.VESPER_USER_DATA) app.setPath('userData', process.env.VESPER_USER_DATA)
 if (!app.requestSingleInstanceLock() && !testMode) app.quit()
+const early = store.load()
+if (early.ai && early.aiPreset === 'heavy') app.commandLine.appendSwitch('force_high_performance_gpu')
 
 let win = null
 let tray = null
@@ -26,6 +30,8 @@ let quitting = false
 const assets = path.join(__dirname, 'ui', 'assets')
 const icon = nativeImage.createFromPath(path.join(assets, 'icon.png'))
 const soundsDir = () => path.join(app.getPath('userData'), 'sounds')
+const voiceDir = () => path.join(app.getPath('userData'), 'voice')
+const MAX_VOICE_SAMPLES = 4
 
 function showWindow() {
   if (!win) return
@@ -112,6 +118,7 @@ function handleIpc() {
   ipcMain.handle('device:mute', (_, id, muted) => winaudio.setMute(id, muted))
   ipcMain.handle('device:listen', (_, id, on) => winaudio.setListen(id, on))
   ipcMain.handle('device:sysfx', (_, id, on) => winaudio.setSysFx(id, on))
+  ipcMain.handle('system:gpus', () => winaudio.gpus())
   ipcMain.handle('driver:status', () => driver.status())
   ipcMain.handle('driver:install', () => driver.install(p => win && win.webContents.send('driver:progress', p)))
   ipcMain.handle('driver:uninstall', () => driver.uninstall())
@@ -120,11 +127,14 @@ function handleIpc() {
     const current = store.get().sounds
     const room = MAX_SOUNDS - current.length
     if (room <= 0) return current
-    const picked = await dialog.showOpenDialog(win, {
-      title: 'Add sounds',
-      properties: ['openFile', 'multiSelections'],
-      filters: [{ name: 'MP3 audio', extensions: ['mp3'] }]
-    })
+    const picked =
+      testMode && process.env.VESPER_TEST_SOUNDS
+        ? { canceled: false, filePaths: process.env.VESPER_TEST_SOUNDS.split(';') }
+        : await dialog.showOpenDialog(win, {
+            title: 'Add sounds',
+            properties: ['openFile', 'multiSelections'],
+            filters: [{ name: 'MP3 audio', extensions: ['mp3'] }]
+          })
     if (picked.canceled) return current
     fs.mkdirSync(soundsDir(), { recursive: true })
     const added = picked.filePaths.slice(0, room).map(file => {
@@ -138,7 +148,35 @@ function handleIpc() {
     fs.rmSync(path.join(soundsDir(), path.basename(id) + '.mp3'), { force: true })
     return store.set({ sounds: store.get().sounds.filter(s => s.id !== id) }).sounds
   })
-  ipcMain.handle('app:info', () => ({ version: app.getVersion(), packaged: app.isPackaged, testMode }))
+  ipcMain.handle('voice:save', (_, bytes, meta) => {
+    fs.mkdirSync(voiceDir(), { recursive: true })
+    const keep = meta.replace ? [] : store.get().voiceSamples.slice(-(MAX_VOICE_SAMPLES - 1))
+    if (meta.replace) for (const old of store.get().voiceSamples) fs.rmSync(path.join(voiceDir(), old.id + '.pcm'), { force: true })
+    const id = crypto.randomUUID()
+    fs.writeFileSync(path.join(voiceDir(), id + '.pcm'), Buffer.from(bytes))
+    const samples = [...keep, { id, language: meta.language, seconds: meta.seconds, created: Date.now() }]
+    for (const old of store.get().voiceSamples) if (!samples.some(k => k.id === old.id)) fs.rmSync(path.join(voiceDir(), old.id + '.pcm'), { force: true })
+    return store.set({ voiceSamples: samples, voiceprints: {} }).voiceSamples
+  })
+  ipcMain.handle('voice:load', () =>
+    store.get().voiceSamples.map(s => ({ id: s.id, bytes: fs.readFileSync(path.join(voiceDir(), s.id + '.pcm')) }))
+  )
+  ipcMain.handle('voice:clear', () => {
+    for (const old of store.get().voiceSamples) fs.rmSync(path.join(voiceDir(), old.id + '.pcm'), { force: true })
+    return store.set({ voiceSamples: [], voiceprints: {} }).voiceSamples
+  })
+  ipcMain.handle('app:relaunch', () => {
+    store.flush()
+    quitting = true
+    app.relaunch({ execPath: process.env.PORTABLE_EXECUTABLE_FILE || process.execPath, args: process.argv.slice(1) })
+    app.exit(0)
+  })
+  ipcMain.handle('app:info', () => ({ version: app.getVersion(), packaged: app.isPackaged, testMode, uptime: os.uptime() }))
+  ipcMain.handle('app:settings', () => shell.openExternal('ms-settings:recovery'))
+  ipcMain.handle('system:restart', (_, cancel) => {
+    const args = cancel ? ['/a'] : ['/r', '/t', '15', '/c', 'Vesper Audio is restarting Windows to finish driver setup']
+    return new Promise(resolve => execFile('shutdown.exe', args, { windowsHide: true }, err => resolve(!err)))
+  })
   ipcMain.handle('app:repo', () => shell.openExternal(REPO_URL))
   ipcMain.handle('app:quit', quit)
   ipcMain.handle('app:log', (_, line) => {
@@ -155,7 +193,6 @@ app.on('window-all-closed', () => app.quit())
 
 app.whenReady().then(() => {
   app.setAppUserModelId('com.ayushue5.vesperaudio')
-  store.load()
   protocol.handle('vesper', req => {
     const url = new URL(req.url)
     const base = url.hostname === 'sounds' ? soundsDir() : models.dir()

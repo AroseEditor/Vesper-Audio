@@ -59,6 +59,7 @@ module.exports = {
   setMute: (id, muted) => run(['mute', id, muted ? '1' : '0']),
   setListen: (id, on) => run(['listen', id, on ? '1' : '0']).catch(() => runElevated(['listen', id, on ? '1' : '0'])),
   setSysFx: (id, on) => run(['sysfx', id, on ? '1' : '0']),
+  gpus: () => run(['gpus']),
   driverStatus: () => run(['driver-status']),
   driverInstall: dir => runElevated(['driver-install', dir]),
   driverUninstall: () => runElevated(['driver-uninstall'])

@@ -1,4 +1,4 @@
-const RATE = 16000
+export const RATE = 16000
 const WIN = 400
 const SHIFT = 160
 const NFFT = 512
@@ -7,6 +7,7 @@ const MELS = 80
 const VAD_RMS = 0.006
 const WINDOW_SECONDS = 1.6
 const CHUNK_SECONDS = 0.1
+export const MIN_SPEECH_SECONDS = 10
 
 const hamming = Float64Array.from({ length: WIN }, (_, i) => 0.54 - 0.46 * Math.cos((2 * Math.PI * i) / (WIN - 1)))
 const cosT = Float64Array.from({ length: HALF }, (_, i) => Math.cos((2 * Math.PI * i) / NFFT))
@@ -112,7 +113,7 @@ export function fbank(x) {
   return out
 }
 
-function unit(v) {
+export function unit(v) {
   let n = 0
   for (const x of v) n += x * x
   n = Math.sqrt(n) || 1
@@ -125,19 +126,43 @@ export function cosine(a, b) {
   return s
 }
 
-export async function loadSpeaker(url) {
-  const ort = await import('./vendor/ort.min.mjs')
-  ort.env.wasm.wasmPaths = new URL('./vendor/', import.meta.url).href
-  ort.env.wasm.numThreads = 1
-  ort.env.wasm.proxy = false
-  const session = await ort.InferenceSession.create(url, { executionProviders: ['wasm'], graphOptimizationLevel: 'all' })
+export async function loadSpeaker(url, provider = 'wasm') {
+  const worker = new Worker(new URL('./speaker.worker.js', import.meta.url), { type: 'module' })
+  const pending = new Map()
+  let seq = 0
+  const ready = new Promise((resolve, reject) => {
+    worker.onmessage = e => {
+      const m = e.data
+      if (m.type === 'ready') resolve()
+      else if (m.type === 'error') reject(new Error(m.message))
+      else if (m.type === 'embedding') {
+        const p = pending.get(m.id)
+        pending.delete(m.id)
+        if (m.error) p.reject(new Error(m.error))
+        else p.resolve(new Float32Array(m.emb))
+      }
+    }
+    worker.onerror = e => reject(new Error(e.message || 'speaker worker failed'))
+  })
+  worker.postMessage({ type: 'init', url, provider })
+  try {
+    await ready
+  } catch (err) {
+    worker.terminate()
+    throw err
+  }
   return {
-    async embed(samples) {
-      const feats = fbank(samples)
-      const frames = feats.length / MELS
-      if (!frames) throw new Error('audio too short for embedding')
-      const out = await session.run({ [session.inputNames[0]]: new ort.Tensor('float32', feats, [1, frames, MELS]) })
-      return unit(out[session.outputNames[0]].data)
+    provider,
+    embed(samples) {
+      return new Promise((resolve, reject) => {
+        const id = ++seq
+        pending.set(id, { resolve, reject })
+        const copy = Float32Array.from(samples)
+        worker.postMessage({ type: 'embed', id, samples: copy }, [copy.buffer])
+      })
+    },
+    dispose() {
+      worker.terminate()
     }
   }
 }
@@ -178,6 +203,53 @@ function concat(parts) {
   return out
 }
 
+export function pcmToBytes(audio) {
+  const out = new Int16Array(audio.length)
+  for (let i = 0; i < audio.length; i++) out[i] = Math.max(-32768, Math.min(32767, Math.round(audio[i] * 32767)))
+  return out.buffer
+}
+
+export function bytesToPcm(buffer) {
+  const src = new Int16Array(buffer.buffer ? buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength) : buffer)
+  return Float32Array.from(src, v => v / 32767)
+}
+
+export async function buildPrint(speaker, segments, onProgress = () => {}) {
+  const win = Math.round(WINDOW_SECONDS * RATE)
+  const hop = Math.round(win / 2)
+  const centroids = []
+  const sims = []
+  let total = 0
+  for (const audio of segments) total += Math.max(0, Math.floor((audio.length - win) / hop) + 1)
+  let done = 0
+  for (const audio of segments) {
+    const embeddings = []
+    for (let at = 0; at + win <= audio.length; at += hop) {
+      const part = audio.subarray(at, at + win)
+      if (rms(part) > VAD_RMS) embeddings.push(await speaker.embed(part))
+      onProgress(++done / Math.max(1, total))
+    }
+    if (embeddings.length < 4) continue
+    const mean = new Float32Array(embeddings[0].length)
+    for (const e of embeddings) for (let i = 0; i < mean.length; i++) mean[i] += e[i]
+    const centroid = unit(mean)
+    centroids.push(centroid)
+    for (const e of embeddings) sims.push(cosine(e, centroid))
+  }
+  if (!centroids.length) throw new Error('Not enough speech was captured. Please read the paragraph again.')
+  const mu = sims.reduce((a, b) => a + b, 0) / sims.length
+  const sigma = Math.sqrt(sims.reduce((a, b) => a + (b - mu) ** 2, 0) / sims.length)
+  return {
+    id: crypto.randomUUID(),
+    centroids: centroids.map(c => Array.from(c)),
+    thr: Math.min(0.5, Math.max(0.35, mu - 2.5 * sigma)),
+    mu,
+    sigma,
+    windows: sims.length,
+    created: Date.now()
+  }
+}
+
 export class Enroller {
   constructor(ctx, source, onProgress) {
     this.speech = []
@@ -199,36 +271,9 @@ export class Enroller {
     }
   }
 
-  async finish(speaker) {
+  stop() {
     this.tap.stop()
-    const audio = concat(this.speech)
-    const win = Math.round(WINDOW_SECONDS * RATE)
-    const hop = Math.round(win / 2)
-    const embeddings = []
-    for (let at = 0; at + win <= audio.length; at += hop) {
-      const part = audio.subarray(at, at + win)
-      if (rms(part) > VAD_RMS) embeddings.push(await speaker.embed(part))
-    }
-    if (embeddings.length < 6) throw new Error('Not enough speech was captured. Please read the paragraph again.')
-    const mean = new Float32Array(embeddings[0].length)
-    for (const e of embeddings) for (let i = 0; i < mean.length; i++) mean[i] += e[i]
-    const centroid = unit(mean)
-    const sims = embeddings.map(e => cosine(e, centroid))
-    const mu = sims.reduce((a, b) => a + b, 0) / sims.length
-    const sigma = Math.sqrt(sims.reduce((a, b) => a + (b - mu) ** 2, 0) / sims.length)
-    return {
-      id: crypto.randomUUID(),
-      emb: Array.from(centroid),
-      thr: Math.min(0.5, Math.max(0.35, mu - 2.5 * sigma)),
-      mu,
-      sigma,
-      windows: embeddings.length,
-      created: Date.now()
-    }
-  }
-
-  cancel() {
-    this.tap.stop()
+    return concat(this.speech)
   }
 }
 
@@ -237,7 +282,7 @@ export class VoiceGate {
     this.ctx = ctx
     this.source = source
     this.gate = gate
-    this.print = Float32Array.from(voiceprint.emb)
+    this.centroids = voiceprint.centroids.map(c => Float32Array.from(c))
     this.printId = voiceprint.id
     this.thr = voiceprint.thr
     this.speaker = speaker
@@ -291,8 +336,8 @@ export class VoiceGate {
     this.busy = true
     try {
       const n = Math.round(WINDOW_SECONDS * RATE)
-      const emb = await this.speaker.embed(this.ring.slice(this.ring.length - n))
-      this.sim = cosine(emb, this.print)
+      const emb = await this.speaker.embed(this.ring.subarray(this.ring.length - n))
+      this.sim = Math.max(...this.centroids.map(c => cosine(emb, c)))
       const was = this.verdict
       if (this.sim >= this.thr) this.verdict = 'me'
       else if (was !== 'me' || this.sim < this.thr - 0.05) this.verdict = 'other'

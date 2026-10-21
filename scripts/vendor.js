@@ -10,19 +10,19 @@ const fonts = nm('@fontsource', 'inter', 'files')
 
 const copies = [
   [path.join(ns, 'index.js'), 'noise.js'],
-  [path.join(ns, 'gtcrn', 'workletProcessor.js'), 'gtcrn.worklet.js'],
   [path.join(ns, 'rnnoise', 'workletProcessor.js'), 'rnnoise.worklet.js'],
-  [path.join(ns, 'gtcrn.wasm'), 'gtcrn.wasm'],
   [path.join(ns, 'rnnoise.wasm'), 'rnnoise.wasm'],
   [path.join(ns, 'rnnoise_simd.wasm'), 'rnnoise_simd.wasm'],
   [path.join(ns, 'speex.wasm'), 'speex.wasm'],
   [path.join(ort, 'ort.wasm.min.mjs'), 'ort.min.mjs'],
   [path.join(ort, 'ort-wasm-simd-threaded.mjs'), 'ort-wasm-simd-threaded.mjs'],
   [path.join(ort, 'ort-wasm-simd-threaded.wasm'), 'ort-wasm-simd-threaded.wasm'],
+  [path.join(ort, 'ort.webgpu.min.mjs'), 'ort.webgpu.min.mjs'],
+  [path.join(ort, 'ort-wasm-simd-threaded.asyncify.mjs'), 'ort-wasm-simd-threaded.asyncify.mjs'],
+  [path.join(ort, 'ort-wasm-simd-threaded.asyncify.wasm'), 'ort-wasm-simd-threaded.asyncify.wasm'],
   ...[400, 500, 600, 700].map(w => [path.join(fonts, `inter-latin-${w}-normal.woff2`), `inter-${w}.woff2`])
 ]
 
-fs.rmSync(out, { recursive: true, force: true })
 fs.mkdirSync(out, { recursive: true })
 for (const [from, to] of copies) fs.copyFileSync(from, path.join(out, to))
 

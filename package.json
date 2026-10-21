@@ -11,7 +11,8 @@
     "start": "electron .",
     "helper": "cargo build --release --manifest-path helper/Cargo.toml",
     "test": "node scripts/test.js",
-    "dist": "electron-builder --win nsis portable --publish never"
+    "dist": "electron-builder --win nsis portable --publish never",
+    "build:df": "node scripts/build-df.js"
   },
   "devDependencies": {
     "@fontsource/inter": "^5.3.0",
@@ -24,13 +25,13 @@
   "build": {
     "appId": "com.ayushue5.vesperaudio",
     "productName": "Vesper Audio",
-    "artifactName": "Vesper-Audio-${version}-${target}.${ext}",
     "directories": {
       "output": "dist"
     },
     "files": [
       "src/**/*",
-      "package.json"
+      "package.json",
+      "!src/ui/vendor/ort-wasm-simd-threaded.jsep.*"
     ],
     "extraResources": [
       {
@@ -51,7 +52,8 @@
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "runAfterFinish": true
+      "runAfterFinish": true,
+      "artifactName": "Vesper-Audio-Setup-${version}.${ext}"
     },
     "portable": {
       "artifactName": "Vesper-Audio-${version}-portable.${ext}"

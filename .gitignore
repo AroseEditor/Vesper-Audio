@@ -4,3 +4,4 @@ helper/target/
 src/ui/vendor/
 *.log
 .test-out/
+.cache/

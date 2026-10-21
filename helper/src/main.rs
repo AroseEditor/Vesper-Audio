@@ -1,5 +1,6 @@
 mod audio;
 mod driver;
+mod gpu;
 
 use serde_json::{json, Value};
 use std::env;
@@ -23,6 +24,7 @@ fn run(args: &[String]) -> Result<Value, String> {
         "mute" => audio::set_mute(need(args, 1)?, need(args, 2)? == "1"),
         "listen" => audio::set_listen(need(args, 1)?, need(args, 2)? == "1"),
         "sysfx" => audio::set_sysfx(need(args, 1)?, need(args, 2)? == "1"),
+        "gpus" => gpu::list(),
         "driver-status" => driver::status(),
         "driver-install" => driver::install(need(args, 1)?),
         "driver-uninstall" => driver::uninstall(),

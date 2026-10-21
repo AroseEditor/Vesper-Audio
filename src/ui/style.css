@@ -23,7 +23,7 @@ html, body { height: 100%; margin: 0; }
 body {
   background: var(--bg);
   color: var(--text);
-  font: 400 14px/1.45 Inter, "Segoe UI", system-ui, sans-serif;
+  font: 400 14px/1.45 Inter, "Segoe UI", "Nirmala UI", system-ui, sans-serif;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -294,3 +294,12 @@ input[type="range"]:disabled { opacity: 0.4; cursor: not-allowed; }
 .paragraph span { transition: color 0.2s; }
 .paragraph span.done { color: var(--text); }
 .error { color: var(--danger); }
+
+.ok { color: var(--accent); }
+.tabs { display: flex; gap: 8px; margin: 0 0 12px; }
+.tab { background: var(--panel-2); border: 1px solid var(--line); border-radius: 999px; padding: 6px 16px; cursor: pointer; font-family: "Nirmala UI", Inter, "Segoe UI", sans-serif; }
+.tab.active { background: linear-gradient(135deg, var(--accent-2), #28c9b4); border-color: transparent; color: #fff; font-weight: 600; }
+.paragraph span:lang(hi) { font-family: "Nirmala UI", "Segoe UI", sans-serif; }
+.inline-check { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); cursor: pointer; }
+.steps { margin: 0 0 12px; padding-left: 22px; }
+.steps li { margin: 6px 0; }

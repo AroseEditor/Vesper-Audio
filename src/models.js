@@ -5,11 +5,24 @@ const crypto = require('crypto')
 const { Readable } = require('stream')
 const { pipeline } = require('stream/promises')
 
+const SHERPA = 'https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/'
+const DPDFNET = 'https://huggingface.co/Ceva-IP/DPDFNet/resolve/dd6818d00f50c836fed43a6243ebe49116de5964/onnx/'
+
 const table = {
-  speaker: {
-    file: 'wespeaker_en_voxceleb_CAM++.onnx',
-    url: 'https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/wespeaker_en_voxceleb_CAM%2B%2B.onnx',
-    sha256: 'c46fad10b5f81e1aa4a60c162714208577093655076c5450f8c469e522ec54ef'
+  speakerSmall: {
+    file: 'vesper-speaker-small.onnx',
+    url: 'https://github.com/AroseEditor/Vesper-Audio/releases/download/models-v1/vesper-speaker-small.onnx',
+    sha256: '9c6c85d71d0718e62d765387375a10830d4dab03084fe44eb04868d6957484a0'
+  },
+  denoiserHeavy: {
+    file: 'dpdfnet2_48khz_hr.onnx',
+    url: DPDFNET + 'dpdfnet2_48khz_hr.onnx',
+    sha256: '7f0575a5cec0ba4ffd8f8bd657e06d007e4ccdd955d76faab922b9d3291dc14b'
+  },
+  speakerHeavy: {
+    file: 'wespeaker_en_voxceleb_resnet293_LM.onnx',
+    url: SHERPA + 'wespeaker_en_voxceleb_resnet293_LM.onnx',
+    sha256: 'f65dbc820e534eef64ae12d1e289e20244d60e60f7f00d7b092092b1c458be2e'
   }
 }
 
@@ -48,4 +61,4 @@ async function ensure(name, emit) {
   return `vesper://models/${m.file}`
 }
 
-module.exports = { ensure, dir }
+module.exports = { ensure, dir, table }

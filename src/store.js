@@ -18,7 +18,8 @@ const defaults = {
   gains: {},
   boardVolume: 100,
   sounds: [],
-  voiceprint: null,
+  voiceSamples: [],
+  voiceprints: {},
   driverVersion: null,
   setupDone: false
 }

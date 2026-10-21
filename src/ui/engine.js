@@ -1,16 +1,18 @@
-import { GtcrnWorkletNode, RnnoiseWorkletNode, loadGtcrn, loadRnnoise } from './vendor/noise.js'
+import { RnnoiseWorkletNode, loadRnnoise } from './vendor/noise.js'
 import { VoiceGate } from './voice.js'
 
 const SPEEX_ID = '@sapphi-red/web-noise-suppressor/speex'
-const GTCRN_DELAY = 0.032
+const HOP = 480
+const PREBUFFER_HOPS = 2
+const DFN3_DRY_DELAY = 0.05
 const MAX_ATTENUATION_DB = 45
-const MAKEUP_DB = { rnnoise: 7, speex: 2, ai: 8.5 }
+const MAKEUP_DB = { rnnoise: 7, speex: 2, dfn3: 0, heavy: 0 }
 const db = v => Math.pow(10, v / 20)
+const asset = file => new URL(file, import.meta.url).href
 
 function leak(strength) {
   return strength >= 99 ? 0 : Math.pow(10, -((Math.max(0, strength) / 100) * MAX_ATTENUATION_DB) / 20)
 }
-const worklet = file => new URL(file, import.meta.url).href
 
 async function listDevices(kind) {
   let list = await navigator.mediaDevices.enumerateDevices()
@@ -30,7 +32,7 @@ export async function resolveDevice(kind, name) {
 }
 
 function modeOf(cfg) {
-  if (cfg.ai) return cfg.aiPreset === 'clearcast' ? 'clearcast' : 'custom'
+  if (cfg.ai) return cfg.aiPreset === 'heavy' ? 'heavy' : cfg.aiPreset === 'clearcast' ? 'clearcast' : 'custom'
   if (cfg.basic) return cfg.basicPreset === 'speex' ? 'speex' : 'rnnoise'
   return 'off'
 }
@@ -41,8 +43,10 @@ export class Engine {
     this.cfg = null
     this.structKey = ''
     this.mode = ''
+    this.active = ''
     this.fx = []
     this.fxNodes = {}
+    this.disposers = []
     this.wasm = {}
     this.buffers = new Map()
     this.playing = new Map()
@@ -51,7 +55,8 @@ export class Engine {
     this.draining = null
     this.onSoundEnd = () => {}
     this.onVoiceState = () => {}
-    this.state = { running: false, hasCable: false, error: '' }
+    this.stats = { underruns: 0, queued: 0, backlog: 0 }
+    this.state = { running: false, hasCable: false, error: '', warning: '' }
   }
 
   apply(cfg) {
@@ -101,9 +106,7 @@ export class Engine {
       }
     })
     const ctx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' })
-    await Promise.all(
-      ['tap', 'gtcrn', 'rnnoise', 'speex'].map(n => ctx.audioWorklet.addModule(worklet(n === 'tap' ? './tap.worklet.js' : `./vendor/${n}.worklet.js`)))
-    )
+    await Promise.all(['./tap.worklet.js', './denoise.worklet.js', './vendor/rnnoise.worklet.js', './vendor/speex.worklet.js'].map(f => ctx.audioWorklet.addModule(asset(f))))
     this.stream = stream
     this.ctx = ctx
     this.src = ctx.createMediaStreamSource(stream)
@@ -158,9 +161,8 @@ export class Engine {
 
   async wasmBinary(name) {
     if (!this.wasm[name]) {
-      const url = worklet(`./vendor/${name}.wasm`)
-      this.wasm[name] =
-        name === 'rnnoise' ? await loadRnnoise({ url, simdUrl: worklet('./vendor/rnnoise_simd.wasm') }) : name === 'gtcrn' ? await loadGtcrn({ url }) : await (await fetch(url)).arrayBuffer()
+      const url = asset(`./vendor/${name}.wasm`)
+      this.wasm[name] = name === 'rnnoise' ? await loadRnnoise({ url, simdUrl: asset('./vendor/rnnoise_simd.wasm') }) : await (await fetch(url)).arrayBuffer()
     }
     return this.wasm[name].slice(0)
   }
@@ -168,22 +170,31 @@ export class Engine {
   async chain(cfg) {
     const mode = modeOf(cfg)
     const ctx = this.ctx
-    if (mode !== this.mode) {
+    if (mode !== this.mode || (mode === 'heavy' && this.heavyKey !== cfg.heavyDenoiserUrl)) {
       this.teardownFx()
       this.mode = mode
-      await this.buildFx(mode, cfg)
+      this.state.warning = ''
+      try {
+        await this.buildFx(mode, cfg)
+      } catch (err) {
+        if (mode !== 'heavy') throw err
+        this.teardownFx()
+        this.state.warning = 'Heavy model could not start (' + String((err && err.message) || err) + '). Using Custom instead.'
+        await this.buildFx('custom', cfg)
+      }
     }
     if (mode === 'speex' && this.fxNodes.speex) this.fxNodes.speex.port.postMessage(-Math.round(cfg.speexDb))
     if (mode === 'clearcast' && this.fxNodes.wet) {
       const k = leak(cfg.aiStrength)
-      this.fxNodes.wet.gain.setTargetAtTime((1 - k) * db(MAKEUP_DB.ai), ctx.currentTime, 0.02)
+      this.fxNodes.wet.gain.setTargetAtTime(1 - k, ctx.currentTime, 0.02)
       this.fxNodes.dry.gain.setTargetAtTime(k, ctx.currentTime, 0.02)
     }
     this.gain.gain.setTargetAtTime(Math.max(0, cfg.gain) / 100, ctx.currentTime, 0.02)
-    const wantVoice = mode === 'custom' && cfg.voiceprint && cfg.speakerModel
-    if (wantVoice && (!this.voice || this.voice.printId !== cfg.voiceprint.id)) {
+    const gated = this.active === 'custom' || this.active === 'heavy'
+    const wantVoice = gated && cfg.voiceprint && cfg.speaker
+    if (wantVoice && (!this.voice || this.voice.printId !== cfg.voiceprint.id || this.voice.speaker !== cfg.speaker)) {
       if (this.voice) this.voice.stop()
-      this.voice = new VoiceGate(ctx, this.fxOut, this.gate, cfg.voiceprint, cfg.speakerModel, s => this.onVoiceState(s))
+      this.voice = new VoiceGate(ctx, this.fxOut, this.gate, cfg.voiceprint, cfg.speaker, s => this.onVoiceState(s))
       await this.voice.start()
     } else if (!wantVoice && this.voice) {
       this.voice.stop()
@@ -192,10 +203,50 @@ export class Engine {
     }
   }
 
+  async denoiser(options) {
+    const ctx = this.ctx
+    const worker = new Worker(asset('./denoise.worker.js'), { type: 'module' })
+    const channel = new MessageChannel()
+    const node = new AudioWorkletNode(ctx, 'vesper-denoise', {
+      channelCount: 1,
+      channelCountMode: 'explicit',
+      processorOptions: { hop: HOP, prebuffer: PREBUFFER_HOPS }
+    })
+    node.port.postMessage({ type: 'link', port: channel.port1 }, [channel.port1])
+    node.port.onmessage = e => {
+      if (e.data.type === 'stats') {
+        this.stats.underruns = e.data.underruns
+        this.stats.queued = e.data.queued
+      }
+    }
+    const ready = new Promise((resolve, reject) => {
+      worker.onmessage = e => {
+        const m = e.data
+        if (m.type === 'ready') resolve(m)
+        else if (m.type === 'error') reject(new Error(m.message))
+        else if (m.type === 'stats') this.stats.backlog = m.backlog
+      }
+      worker.onerror = e => reject(new Error(e.message || 'denoise worker failed'))
+    })
+    worker.postMessage({ type: 'init', port: channel.port2, ...options }, [channel.port2])
+    try {
+      const info = await ready
+      if (info.hop !== HOP) throw new Error('unexpected denoiser frame size ' + info.hop)
+    } catch (err) {
+      worker.terminate()
+      node.disconnect()
+      throw err
+    }
+    this.disposers.push(() => worker.terminate())
+    return node
+  }
+
   async buildFx(mode, cfg) {
     const ctx = this.ctx
     const add = (...nodes) => this.fx.push(...nodes)
-    this.fxOut.gain.value = mode === 'rnnoise' || mode === 'speex' ? db(MAKEUP_DB[mode]) : 1
+    this.active = mode
+    this.heavyKey = mode === 'heavy' ? cfg.heavyDenoiserUrl : ''
+    this.fxOut.gain.value = db(MAKEUP_DB[mode === 'clearcast' || mode === 'custom' ? 'dfn3' : mode] || 0)
     if (mode === 'off') {
       this.fxIn.connect(this.fxOut)
     } else if (mode === 'rnnoise') {
@@ -213,32 +264,35 @@ export class Engine {
       add(node)
       this.fxNodes = { speex: node }
     } else {
-      const node = new GtcrnWorkletNode(ctx, { maxChannels: 1, wasmBinary: await this.wasmBinary('gtcrn') })
+      const node =
+        mode === 'heavy'
+          ? await this.denoiser({ backend: 'dpdfnet', model: 'dpdfnet2_48khz_hr', modelUrl: cfg.heavyDenoiserUrl, provider: 'wasm' })
+          : await this.denoiser({ backend: 'dfn3' })
       const wet = ctx.createGain()
       const dry = ctx.createGain()
-      const delay = ctx.createDelay(0.2)
-      delay.delayTime.value = GTCRN_DELAY
+      const delay = ctx.createDelay(0.5)
+      delay.delayTime.value = DFN3_DRY_DELAY
       const k = mode === 'clearcast' ? leak(cfg.aiStrength) : 0
-      wet.gain.value = (1 - k) * db(MAKEUP_DB.ai)
+      wet.gain.value = 1 - k
       dry.gain.value = k
       this.fxIn.connect(node).connect(wet).connect(this.fxOut)
       this.fxIn.connect(delay).connect(dry).connect(this.fxOut)
       add(node, wet, dry, delay)
-      this.fxNodes = { gtcrn: node, wet, dry }
+      this.fxNodes = { denoise: node, wet, dry }
     }
   }
 
   teardownFx() {
+    for (const dispose of this.disposers) dispose()
+    this.disposers = []
     for (const n of this.fx) {
       if (typeof n.destroy === 'function') n.destroy()
       n.disconnect()
     }
     this.fx = []
     this.fxNodes = {}
-    try {
-      this.fxIn.disconnect()
-      this.fxIn.disconnect()
-    } catch {}
+    this.active = ''
+    if (this.fxIn) this.fxIn.disconnect()
   }
 
   async route(cfg) {
@@ -267,8 +321,8 @@ export class Engine {
     node.getFloatTimeDomainData(buf)
     let sum = 0
     for (const v of buf) sum += v * v
-    const db = 20 * Math.log10(Math.sqrt(sum / buf.length) + 1e-9)
-    return Math.min(1, Math.max(0, (db + 60) / 60))
+    const level = 20 * Math.log10(Math.sqrt(sum / buf.length) + 1e-9)
+    return Math.min(1, Math.max(0, (level + 60) / 60))
   }
 
   async buffer(id, url) {

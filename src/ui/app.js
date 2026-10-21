@@ -1,22 +1,35 @@
 import { hydrate, icon } from './icons.js'
 import { Engine } from './engine.js'
-import { Enroller, loadSpeaker } from './voice.js'
+import { Enroller, loadSpeaker, buildPrint, pcmToBytes, bytesToPcm, MIN_SPEECH_SECONDS } from './voice.js'
 
 const api = window.vesper
 const $ = id => document.getElementById(id)
 const engine = new Engine()
 
-const PARAGRAPH =
-  'When the sunlight strikes raindrops in the air, they act as a prism and form a rainbow. The rainbow is a division of white light into many beautiful colors. These take the shape of a long round arch, with its path high above, and its two ends apparently beyond the horizon. There is, according to legend, a boiling pot of gold at one end. People look, but no one ever finds it. When a man looks for something beyond his reach, his friends say he is looking for the pot of gold at the end of the rainbow.'
+const PARAGRAPHS = {
+  en: {
+    label: 'English',
+    text: 'When the sunlight strikes raindrops in the air, they act as a prism and form a rainbow. The rainbow is a division of white light into many beautiful colors. These take the shape of a long round arch, with its path high above, and its two ends apparently beyond the horizon. There is, according to legend, a boiling pot of gold at one end. People look, but no one ever finds it. When a man looks for something beyond his reach, his friends say he is looking for the pot of gold at the end of the rainbow.'
+  },
+  hi: {
+    label: 'हिन्दी',
+    text: 'भारत एक विशाल और विविधताओं से भरा हुआ देश है। यहाँ हर कुछ किलोमीटर पर बोली, खान-पान और पहनावा बदल जाता है। सुबह की ठंडी हवा में चाय की खुशबू फैल जाती है और गलियों में बच्चों की हँसी गूँजने लगती है। पहाड़ों से लेकर समंदर तक, हर जगह की अपनी एक अलग कहानी है। लोग मिल-जुलकर त्योहार मनाते हैं, एक-दूसरे की मदद करते हैं और नई उम्मीदों के साथ आगे बढ़ते हैं। जब कोई अपने सपनों के पीछे चलता है, तो पूरी दुनिया उसके लिए रास्ता बना देती है।'
+  }
+}
+const PRESET_LABEL = { custom: 'Custom', heavy: 'Custom Heavy', clearcast: 'ClearCast' }
 const SPEECH_TARGET = 30
 const LAUGH_TARGET = 4
+const NVIDIA = 0x10de
+const MIN_VRAM_MB = 2048
 
 const state = {
   settings: null,
   devices: [],
   driver: null,
-  speaker: null,
-  speakerLoading: null,
+  speakers: {},
+  speakerLoading: {},
+  gpus: [],
+  heavyUrl: '',
   notices: {},
   info: { version: '', testMode: false },
   voice: null,
@@ -60,9 +73,13 @@ function gainFor(device) {
   return device && state.settings.gains[device.name] != null ? state.settings.gains[device.name] : 100
 }
 
+const tierOf = () => (state.settings.aiPreset === 'heavy' ? 'heavy' : 'small')
+
 function engineConfig() {
   const s = state.settings
   const input = currentInput()
+  const tier = tierOf()
+  const loaded = state.speakers[tier]
   return {
     inputName: input ? input.name : '',
     cableName: cableDevice() ? cableDevice().name : '',
@@ -76,8 +93,9 @@ function engineConfig() {
     speexDb: s.speexDb,
     monitor: s.monitor,
     boardVolume: s.boardVolume,
-    voiceprint: s.voiceprint,
-    speakerModel: state.speaker
+    voiceprint: s.voiceprints[tier] || null,
+    speaker: loaded ? loaded.speaker : null,
+    heavyDenoiserUrl: state.heavyUrl
   }
 }
 
@@ -90,16 +108,79 @@ function sync() {
     const waiters = syncWaiters
     syncWaiters = []
     try {
-      const cfg = engineConfig()
-      if (cfg.ai && cfg.aiPreset === 'custom' && cfg.voiceprint && !state.speaker) await ensureSpeaker().catch(() => {})
-      cfg.speakerModel = state.speaker
-      await engine.apply(cfg)
+      await prepare()
+      await engine.apply(engineConfig())
       notice('engine', engine.state.error ? { text: 'Audio engine: ' + engine.state.error } : null)
+      notice('engineWarn', engine.state.warning ? { text: engine.state.warning } : null)
     } finally {
       waiters.forEach(resolve => resolve())
     }
   }, 60)
   return done
+}
+
+async function prepare() {
+  const s = state.settings
+  if (!s.ai || s.aiPreset === 'clearcast') return
+  try {
+    if (s.aiPreset === 'heavy' && !state.heavyUrl) {
+      notice('voice', { text: 'Downloading the Heavy denoiser' })
+      state.heavyUrl = await api.invoke('model:ensure', 'denoiserHeavy')
+    }
+    if (s.voiceSamples.length) {
+      const tier = tierOf()
+      notice('voice', { text: 'Preparing your voice model' })
+      await ensureSpeaker(tier)
+      if (!s.voiceprints[tier]) await rebuildPrint(tier)
+    }
+  } catch (err) {
+    notice('voice', { text: 'Voice model unavailable: ' + err.message })
+    return
+  }
+  notice('voice', null)
+}
+
+async function gpuVendor() {
+  if (!navigator.gpu) return ''
+  const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' })
+  return adapter && adapter.info ? adapter.info.vendor : ''
+}
+
+const gpuInfo = () => state.gpus.filter(g => g.vendorId === NVIDIA).sort((a, b) => b.vramMb - a.vramMb)[0] || null
+const gpuQualifies = () => {
+  const g = gpuInfo()
+  return Boolean(g && g.vramMb > MIN_VRAM_MB)
+}
+
+async function ensureSpeaker(tier) {
+  if (state.speakers[tier]) return state.speakers[tier].speaker
+  if (!state.speakerLoading[tier]) {
+    state.speakerLoading[tier] = (async () => {
+      if (tier === 'heavy') {
+        try {
+          if ((await gpuVendor()) !== 'nvidia') throw new Error('the NVIDIA graphics card is not active yet, restart Vesper Audio')
+          const speaker = await loadSpeaker(await api.invoke('model:ensure', 'speakerHeavy'), 'webgpu')
+          state.speakers.heavy = { speaker }
+          return speaker
+        } catch (err) {
+          notice('heavy', { text: 'Heavy voice model could not use the graphics card (' + err.message + '). Using the standard voice model.' })
+        }
+      }
+      const speaker = await loadSpeaker(await api.invoke('model:ensure', 'speakerSmall'), 'wasm')
+      state.speakers[tier] = { speaker }
+      return speaker
+    })().finally(() => (state.speakerLoading[tier] = null))
+  }
+  return state.speakerLoading[tier]
+}
+
+async function rebuildPrint(tier, onProgress) {
+  const speaker = await ensureSpeaker(tier)
+  const samples = await api.invoke('voice:load')
+  const progress = onProgress || (p => notice('voice', { text: 'Learning your voice ' + Math.round(p * 100) + '%' }))
+  const print = await buildPrint(speaker, samples.map(x => bytesToPcm(x.bytes)), progress)
+  state.settings.voiceprints = { ...state.settings.voiceprints, [tier]: print }
+  await save({ voiceprints: state.settings.voiceprints })
 }
 
 async function save(patch) {
@@ -205,6 +286,23 @@ function renderDevices() {
   )
 }
 
+function voiceSummary() {
+  const samples = state.settings.voiceSamples
+  if (!samples.length) return 'No voice recorded yet. Record the paragraph once to enable Custom.'
+  const langs = [...new Set(samples.map(x => (PARAGRAPHS[x.language] ? PARAGRAPHS[x.language].label : x.language)))]
+  const seconds = Math.round(samples.reduce((n, x) => n + x.seconds, 0))
+  return `Your voice is saved (${langs.join(' and ')}, ${seconds} s). Custom is best and needs no slider.`
+}
+
+async function pickPreset(v) {
+  closeMenus()
+  if (v === 'heavy') return chooseHeavy()
+  await save({ aiPreset: v })
+  renderHome()
+  if (v === 'custom' && state.settings.ai && !state.settings.voiceSamples.length) await enroll()
+  sync()
+}
+
 function renderHome() {
   const s = state.settings
   $('ai-on').checked = s.ai
@@ -212,29 +310,24 @@ function renderHome() {
   $('basic-on').disabled = s.ai
   $('basic-hint').hidden = !s.ai
   $('monitor-on').checked = s.monitor
-  $('ai-preset-text').textContent = s.aiPreset === 'clearcast' ? 'ClearCast' : 'Custom'
+  $('ai-preset-text').textContent = PRESET_LABEL[s.aiPreset] || 'Custom'
   menuItems(
     document.querySelector('[data-select="ai-preset"] .menu'),
     [
-      { value: 'custom', label: 'Custom', small: 'Speak a paragraph once and the AI learns your voice. It keeps your voice and laughs and drops everything else.' },
+      { value: 'custom', label: 'Custom', tag: 'light', small: 'Speak a paragraph once and the AI learns your voice. It keeps your voice and laughs and drops everything else. About 16 MB, runs on the CPU.' },
+      { value: 'heavy', label: 'Custom Heavy', tag: 'NVIDIA GPU', small: 'Larger models and a graphics card voice lock for the most accurate result. For PCs with an NVIDIA graphics card above 2 GB VRAM. About 130 MB.' },
       { value: 'clearcast', label: 'ClearCast', small: 'Studio-grade AI speech cleanup in the style of SteelSeries Sonar. Strength is adjustable.' }
     ],
     s.aiPreset,
-    async v => {
-      closeMenus()
-      await save({ aiPreset: v })
-      renderHome()
-      if (v === 'custom' && s.ai && !s.voiceprint) await enroll()
-      sync()
-    }
+    pickPreset
   )
-  $('ai-custom-note').hidden = s.aiPreset !== 'custom'
+  $('ai-custom-note').hidden = s.aiPreset === 'clearcast'
   $('ai-strength-row').hidden = s.aiPreset !== 'clearcast'
   $('ai-strength').value = s.aiStrength
   $('ai-strength-out').textContent = s.aiStrength + '%'
   fill($('ai-strength'))
-  $('voice-status').textContent = s.voiceprint ? 'Your voice is saved. Custom is best and needs no slider.' : 'No voice recorded yet. Record the paragraph once to enable Custom.'
-  $('voice-enroll').textContent = s.voiceprint ? 'Re-record' : 'Record voice'
+  $('voice-status').textContent = voiceSummary()
+  $('voice-enroll').textContent = s.voiceSamples.length ? 'Re-record' : 'Record voice'
   $('basic-preset-text').textContent = s.basicPreset === 'speex' ? 'Speex' : 'RNNoise'
   menuItems(
     document.querySelector('[data-select="basic-preset"] .menu'),
@@ -345,15 +438,19 @@ function renderAll() {
   renderDriverNotice()
 }
 
+const pendingReboot = () => state.settings.pendingReboot && state.settings.pendingReboot > Date.now() - state.info.uptime * 1000
+
 function renderDriverNotice() {
   const d = state.driver
   if (vacOut() && vacIn()) return notice('driver', null)
+  if (pendingReboot()) {
+    return notice('driver', { text: 'Vesper Audio Cable is installed. Restart Windows to finish setup.', label: 'Restart', action: () => restartDialog() })
+  }
+  if (d && d.secureBoot && !d.testSigning) {
+    return notice('driver', { text: 'Secure Boot is on, so Windows will not load the Vesper Audio Cable driver.', label: 'Show steps', action: () => secureBootDialog() })
+  }
   if (d && d.nodePresent && !d.running) {
-    return notice('driver', {
-      text: d.testSigning ? 'Vesper Audio Cable is installed but not running yet. Restart Windows to finish setup.' : 'Vesper Audio Cable is installed but Windows is blocking the unsigned driver. Test Mode is off.',
-      label: 'Fix',
-      action: () => installDriver()
-    })
+    return notice('driver', { text: `Vesper Audio Cable is installed but Windows could not start it (code ${d.problem}).`, label: 'Fix', action: () => installDriver() })
   }
   notice('driver', { text: 'Vesper Audio Cable is not installed. Other apps cannot hear Vesper Audio until it is.', label: 'Install', action: () => installDriver() })
 }
@@ -389,16 +486,61 @@ function bindMenus() {
   })
 }
 
-async function ensureSpeaker() {
-  if (state.speaker) return state.speaker
-  if (!state.speakerLoading) {
-    state.speakerLoading = (async () => {
-      const url = await api.invoke('model:ensure', 'speaker')
-      state.speaker = await loadSpeaker(url)
-      return state.speaker
-    })().finally(() => (state.speakerLoading = null))
-  }
-  return state.speakerLoading
+async function chooseHeavy() {
+  const g = gpuInfo()
+  const ok = gpuQualifies()
+  const detected = g ? `${g.name}, ${(g.vramMb / 1024).toFixed(1)} GB VRAM` : 'No NVIDIA graphics card was detected on this PC.'
+  return new Promise(resolve => {
+    const finish = value => {
+      closeDialog()
+      resolve(value)
+    }
+    const enable = async () => {
+      const bar = h('i')
+      const text = h('p', { class: 'muted', text: 'Downloading the Heavy models. This happens once.' })
+      const off = api.on('model:progress', p => (bar.style.width = Math.round(p.value * 100) + '%'))
+      $('dlg-body').replaceChildren(text, h('div', { class: 'progress' }, bar))
+      $('dlg-actions').replaceChildren()
+      try {
+        state.heavyUrl = await api.invoke('model:ensure', 'denoiserHeavy')
+        bar.style.width = '0%'
+        await api.invoke('model:ensure', 'speakerHeavy')
+      } catch (err) {
+        off()
+        $('dlg-title').textContent = 'Heavy models could not be downloaded'
+        $('dlg-body').replaceChildren(h('p', { class: 'error', text: err.message }))
+        $('dlg-actions').replaceChildren(h('button', { class: 'btn', type: 'button', text: 'Close', onclick: () => finish(false) }))
+        return
+      }
+      off()
+      await save({ aiPreset: 'heavy', ai: true, basic: false })
+      if ((await gpuVendor()) !== 'nvidia') {
+        $('dlg-title').textContent = 'Restart to use your NVIDIA graphics card'
+        $('dlg-body').replaceChildren(h('p', { text: 'Vesper Audio has to restart once so Windows runs it on the NVIDIA graphics card. Your settings are saved.' }))
+        $('dlg-actions').replaceChildren(
+          h('button', { class: 'btn', type: 'button', text: 'Later', onclick: () => finish(true) }),
+          h('button', { class: 'btn primary', type: 'button', text: 'Restart now', onclick: () => api.invoke('app:relaunch') })
+        )
+        return
+      }
+      finish(true)
+      renderAll()
+      if (!state.settings.voiceSamples.length) await enroll()
+      sync()
+    }
+    dialog({
+      title: 'Custom Heavy',
+      body: [
+        h('p', { text: 'Custom Heavy uses larger AI models and runs the voice lock on your graphics card for the most accurate result. It is made for PCs with an NVIDIA graphics card that has more than 2 GB of VRAM.' }),
+        h('p', { class: ok ? 'ok' : 'error', text: ok ? 'Detected: ' + detected : g ? detected + ' Heavy needs more than 2 GB.' : detected }),
+        h('p', { class: 'muted', text: 'About 130 MB is downloaded once.' })
+      ],
+      actions: [
+        { label: 'Cancel', onClick: () => finish(false) },
+        { label: 'Enable Heavy', primary: true, disabled: !ok, onClick: enable }
+      ]
+    })
+  })
 }
 
 async function enroll() {
@@ -408,97 +550,237 @@ async function enroll() {
     return false
   }
   const bar = h('i')
-  const info = h('p', { class: 'muted', text: 'Downloading the voice model. This happens once.' })
+  const info = h('p', { class: 'muted', text: 'Preparing the voice model. A download happens the first time only.' })
   const off = api.on('model:progress', p => (bar.style.width = Math.round(p.value * 100) + '%'))
   dialog({ title: 'Preparing voice recognition', body: [info, h('div', { class: 'progress' }, bar)], actions: [] })
   try {
-    await ensureSpeaker()
+    await ensureSpeaker(tierOf())
   } catch (err) {
     off()
     dialog({ title: 'Voice model unavailable', body: h('p', { class: 'error', text: err.message }), actions: [{ label: 'Close', onClick: closeDialog }] })
     return false
   }
   off()
-  await engine.apply({ ...engineConfig(), ai: true, aiPreset: 'custom', basic: false, voiceprint: null, monitor: false })
+  await engine.apply({ ...engineConfig(), ai: true, aiPreset: 'custom', basic: false, voiceprint: null, speaker: null, monitor: false })
   if (!engine.ctx) {
     dialog({ title: 'Microphone unavailable', body: h('p', { class: 'error', text: engine.state.error || 'The audio engine could not start.' }), actions: [{ label: 'Close', onClick: closeDialog }] })
     return false
   }
   return new Promise(resolve => {
-    const words = PARAGRAPH.split(' ').map(w => h('span', { text: w + ' ' }))
-    const progress = h('i')
-    const status = h('p', { class: 'muted', text: 'Press Start, then read the paragraph below at your normal speaking volume.' })
+    const total = SPEECH_TARGET + LAUGH_TARGET
+    const hasSaved = state.settings.voiceSamples.length > 0
+    let language = navigator.language && navigator.language.toLowerCase().startsWith('hi') ? 'hi' : 'en'
     let enroller = null
-    const finish = async ok => {
-      if (enroller) enroller.cancel()
+    let spoken = 0
+    const status = h('p', { class: 'muted', text: 'Pick a language, press Start, then read the whole paragraph at your normal speaking volume.' })
+    const paragraph = h('div', { class: 'paragraph' })
+    const progress = h('i')
+    const clock = h('span', { class: 'muted', text: '0 s' })
+    const add = h('input', { type: 'checkbox', id: 'enroll-add' })
+    const tabs = h('div', { class: 'tabs', role: 'tablist' })
+    const words = () => [...paragraph.children]
+    const drawParagraph = () => {
+      paragraph.replaceChildren(...PARAGRAPHS[language].text.split(' ').map(w => h('span', { text: w + ' ', lang: language })))
+      for (const t of tabs.children) t.classList.toggle('active', t.dataset.lang === language)
+    }
+    for (const [key, p] of Object.entries(PARAGRAPHS)) {
+      tabs.append(
+        h('button', {
+          class: 'tab',
+          type: 'button',
+          role: 'tab',
+          'data-lang': key,
+          text: p.label,
+          onclick: () => {
+            if (enroller) return
+            language = key
+            drawParagraph()
+          }
+        })
+      )
+    }
+    const close = ok => {
+      if (enroller) enroller.stop()
       enroller = null
       closeDialog()
-      await sync()
-      resolve(ok)
+      sync().then(() => resolve(ok))
     }
+    let finishNow = null
     const begin = () => {
-      enroller = new Enroller(engine.ctx, engine.fxOut, seconds => {
-        const total = SPEECH_TARGET + LAUGH_TARGET
-        progress.style.width = Math.min(100, (seconds / total) * 100) + '%'
-        const read = Math.floor((Math.min(seconds, SPEECH_TARGET) / SPEECH_TARGET) * words.length)
-        words.forEach((w, i) => w.classList.toggle('done', i < read))
-        if (seconds >= SPEECH_TARGET && seconds < total) status.textContent = 'Now laugh out loud for a few seconds.'
-        if (seconds >= total) complete()
-      })
-      $('dlg-actions').replaceChildren(h('button', { class: 'btn', type: 'button', text: 'Cancel', onclick: () => finish(false) }))
-      status.textContent = 'Listening. Keep reading.'
+      enroller = new Enroller(engine.ctx, engine.fxOut, update)
+      status.textContent = 'Listening. Read the whole paragraph, then laugh when asked. You can press Stop once you have spoken for ' + MIN_SPEECH_SECONDS + ' seconds.'
+      buttons('recording')
     }
-    const complete = async () => {
+    const buttons = mode => {
+      const list = [h('button', { class: 'btn', type: 'button', text: 'Cancel', onclick: () => close(false) })]
+      if (mode === 'ready') list.push(h('button', { class: 'btn primary', type: 'button', text: 'Start', onclick: begin }))
+      if (mode === 'recording') list.push(h('button', { class: 'btn primary', type: 'button', id: 'enroll-stop', text: `Stop (needs ${MIN_SPEECH_SECONDS} s)`, disabled: true, onclick: () => finishNow() }))
+      $('dlg-actions').replaceChildren(...list)
+    }
+    const update = seconds => {
+      spoken = seconds
+      progress.style.width = Math.min(100, (seconds / total) * 100) + '%'
+      clock.textContent = Math.round(seconds) + ' s'
+      const read = Math.floor((Math.min(seconds, SPEECH_TARGET) / SPEECH_TARGET) * words().length)
+      words().forEach((w, i) => w.classList.toggle('done', i < read))
+      const stop = $('enroll-stop')
+      if (stop && seconds >= MIN_SPEECH_SECONDS) {
+        stop.disabled = false
+        stop.textContent = 'Stop'
+      }
+      if (seconds >= SPEECH_TARGET && seconds < total) status.textContent = 'Now laugh out loud for a few seconds.'
+      if (seconds >= total) finishNow()
+    }
+    finishNow = async () => {
       if (!enroller) return
-      const e = enroller
+      const audio = enroller.stop()
       enroller = null
+      status.className = 'muted'
       status.textContent = 'Learning your voice'
       $('dlg-actions').replaceChildren()
       try {
-        const print = await e.finish(state.speaker)
-        await save({ voiceprint: print, ai: true, aiPreset: 'custom', basic: false })
+        state.settings.voiceSamples = await api.invoke('voice:save', pcmToBytes(audio), { replace: !(hasSaved && add.checked), language, seconds: spoken })
+        state.settings.voiceprints = {}
+        await rebuildPrint(tierOf(), p => (status.textContent = 'Learning your voice ' + Math.round(p * 100) + '%'))
+        await save({ ai: true, aiPreset: state.settings.aiPreset === 'clearcast' ? 'custom' : state.settings.aiPreset, basic: false })
         renderAll()
-        closeDialog()
-        sync()
-        resolve(true)
+        close(true)
       } catch (err) {
-        status.textContent = err.message
         status.className = 'error'
+        status.textContent = err.message
         $('dlg-actions').replaceChildren(
-          h('button', { class: 'btn', type: 'button', text: 'Close', onclick: () => finish(false) }),
-          h('button', { class: 'btn primary', type: 'button', text: 'Try again', onclick: () => finish(false).then(() => enroll()) })
+          h('button', { class: 'btn', type: 'button', text: 'Close', onclick: () => close(false) }),
+          h('button', {
+            class: 'btn primary',
+            type: 'button',
+            text: 'Try again',
+            onclick: () => {
+              drawParagraph()
+              update(0)
+              status.className = 'muted'
+              status.textContent = 'Press Start when you are ready.'
+              buttons('ready')
+            }
+          })
         )
       }
     }
     dialog({
       title: 'Teach Vesper your voice',
-      body: [status, h('div', { class: 'paragraph' }, words), h('div', { class: 'progress' }, progress)],
-      actions: [
-        { label: 'Cancel', onClick: () => finish(false) },
-        { label: 'Start', primary: true, onClick: begin }
-      ]
+      body: [
+        tabs,
+        status,
+        paragraph,
+        h('div', { class: 'progress' }, progress),
+        h('div', { class: 'row' }, clock, hasSaved ? h('label', { class: 'inline-check' }, add, h('span', { text: 'Add to my saved voice instead of replacing it' })) : h('span')),
+        h('p', { class: 'hint', text: 'Your recording stays on this PC. It is only used to recognise your voice.' })
+      ],
+      actions: []
     })
+    drawParagraph()
+    buttons('ready')
   })
 }
 
-async function installDriver() {
-  const status = await api.invoke('driver:status').catch(() => null)
-  state.driver = status
-  const lines = [
-    h('p', { text: 'Vesper Audio Cable is the virtual microphone other apps will hear. It is downloaded from the Vesper Audio release and installed with administrator approval.' })
-  ]
-  if (status && !status.testSigning) {
-    lines.push(
-      h('p', {
-        class: status.secureBoot ? 'error' : 'muted',
-        text: status.secureBoot
-          ? 'Secure Boot is on, so Windows will refuse to load the unsigned driver. Turn Secure Boot off in your firmware settings, then install again.'
-          : 'The driver is unsigned, so Windows Test Mode will be switched on and a restart is needed.'
-      })
-    )
+async function refreshDriver() {
+  state.driver = await api.invoke('driver:status').catch(() => null)
+  return state.driver
+}
+
+async function waitForCable(ms) {
+  const end = Date.now() + ms
+  while (Date.now() < end) {
+    await refreshDevices()
+    if (vacOut() && vacIn()) return true
+    await new Promise(r => setTimeout(r, 1000))
   }
+  return false
+}
+
+function steps(items) {
+  return h('ol', { class: 'steps' }, items.map(t => h('li', { text: t })))
+}
+
+function secureBootDialog() {
+  dialog({
+    title: 'Turn off Secure Boot',
+    body: [
+      h('p', { text: 'Vesper Audio Cable is an unsigned driver. Windows only loads unsigned drivers when Secure Boot is off and Test Mode is on. Vesper Audio switches Test Mode on for you, but Secure Boot can only be changed in your PC firmware.' }),
+      steps([
+        'Save your work and close other apps.',
+        'Open Settings, System, Recovery, then press Restart now next to Advanced startup.',
+        'Choose Troubleshoot, Advanced options, UEFI Firmware Settings, then Restart.',
+        'In the firmware menu open the Security or Boot tab and set Secure Boot to Disabled.',
+        'Save and exit. Windows starts normally.',
+        'Open Vesper Audio and press Install again. Windows will ask for permission once.'
+      ]),
+      h('p', { class: 'hint', text: 'Some online games with kernel anti-cheat refuse to start while Secure Boot is off. Turn it back on when you do not need the Vesper Audio Cable.' })
+    ],
+    actions: [
+      { label: 'Close', onClick: closeDialog },
+      { label: 'Open recovery settings', onClick: () => api.invoke('app:settings') },
+      {
+        label: 'I turned it off, check again',
+        primary: true,
+        onClick: async () => {
+          closeDialog()
+          await refreshDriver()
+          renderAll()
+          if (!(state.driver && state.driver.secureBoot && !state.driver.testSigning)) installDriver()
+        }
+      }
+    ]
+  })
+}
+
+function restartDialog() {
+  dialog({
+    title: 'Restart Windows',
+    body: [h('p', { text: 'Windows needs a restart before Vesper Audio Cable can start. Save your work first. Windows restarts about 15 seconds after you press Restart.' })],
+    actions: [
+      { label: 'Not now', onClick: closeDialog },
+      {
+        label: 'Restart',
+        primary: true,
+        onClick: async () => {
+          await api.invoke('system:restart', false)
+          $('dlg-body').replaceChildren(h('p', { text: 'Restarting in 15 seconds.' }))
+          $('dlg-actions').replaceChildren(
+            h('button', {
+              class: 'btn',
+              type: 'button',
+              text: 'Cancel restart',
+              onclick: async () => {
+                await api.invoke('system:restart', true)
+                closeDialog()
+              }
+            })
+          )
+        }
+      }
+    ]
+  })
+}
+
+const PROBLEMS = {
+  52: 'Windows could not verify the driver signature. Test Mode must be on and Secure Boot off.',
+  10: 'The driver could not start.',
+  31: 'The driver is not working properly.',
+  37: 'The driver returned a failure while starting.',
+  39: 'The driver file is missing or corrupt.'
+}
+
+async function installDriver() {
+  const status = await refreshDriver()
+  if (status && status.secureBoot && !status.testSigning) return secureBootDialog()
   const bar = h('i')
   const text = h('p', { class: 'muted' })
+  const finishDialog = (title, body, actions) => {
+    $('dlg-title').textContent = title
+    $('dlg-body').replaceChildren(...[].concat(body))
+    $('dlg-actions').replaceChildren(...actions)
+  }
+  const closeButton = h('button', { class: 'btn primary', type: 'button', text: 'Close', onclick: closeDialog })
   const run = async () => {
     $('dlg-actions').replaceChildren()
     const off = api.on('driver:progress', p => {
@@ -510,22 +792,41 @@ async function installDriver() {
       const result = await api.invoke('driver:install')
       off()
       await save({ setupDone: true })
-      $('dlg-title').textContent = result.rebootRequired ? 'Restart Windows to finish' : 'Vesper Audio Cable installed'
-      $('dlg-body').replaceChildren(h('p', { text: result.rebootRequired ? 'The driver is installed. Windows needs a restart before Vesper Audio Cable appears.' : 'Vesper Audio Cable is ready.' }))
+      text.textContent = 'Checking that Windows started the driver'
+      if (await waitForCable(12000)) {
+        await save({ pendingReboot: 0 })
+        finishDialog('Vesper Audio Cable is ready', h('p', { text: 'Windows started the driver and the virtual microphone is available. No restart is needed.' }), [closeButton])
+      } else if (result.rebootRequired) {
+        await save({ pendingReboot: Date.now() })
+        finishDialog('Restart Windows to finish', h('p', { text: 'The driver is installed. Windows only starts it after a restart because Test Mode was just switched on.' }), [
+          h('button', { class: 'btn', type: 'button', text: 'Later', onclick: closeDialog }),
+          h('button', { class: 'btn primary', type: 'button', text: 'Restart', onclick: restartDialog })
+        ])
+      } else {
+        const now = await refreshDriver()
+        const code = now && now.problem != null ? now.problem : null
+        finishDialog(
+          'Windows did not start the driver',
+          [
+            h('p', { class: 'error', text: code != null ? `Device problem code ${code}. ${PROBLEMS[code] || ''}` : 'The driver was installed but no device was created.' }),
+            steps(['Make sure Secure Boot is off in your PC firmware.', 'Press Re-init and Setup in Settings to install again.', 'Restart Windows if the problem stays.'])
+          ],
+          [closeButton]
+        )
+      }
     } catch (err) {
       off()
-      $('dlg-title').textContent = 'Driver setup failed'
-      $('dlg-body').replaceChildren(h('p', { class: 'error', text: err.message }))
+      finishDialog('Driver setup failed', h('p', { class: 'error', text: err.message }), [closeButton])
     }
-    $('dlg-actions').replaceChildren(h('button', { class: 'btn primary', type: 'button', text: 'Close', onclick: closeDialog }))
     await refreshDevices()
-    state.driver = await api.invoke('driver:status').catch(() => null)
+    await refreshDriver()
     renderAll()
     sync()
   }
+  const note = status && !status.testSigning ? 'The driver is unsigned, so Windows Test Mode is switched on and a restart may be needed.' : 'Windows asks for permission once.'
   dialog({
-    title: 'Install Vesper Audio Cable',
-    body: lines,
+    title: vacOut() && vacIn() ? 'Reinstall Vesper Audio Cable' : 'Install Vesper Audio Cable',
+    body: [h('p', { text: 'Vesper Audio Cable is the virtual microphone other apps will hear. It is downloaded from the Vesper Audio release and installed with administrator approval.' }), h('p', { class: 'muted', text: note })],
     actions: [
       {
         label: 'Later',
@@ -566,7 +867,7 @@ function bindControls() {
 
   $('ai-on').addEventListener('change', async e => {
     const on = e.target.checked
-    if (on && state.settings.aiPreset === 'custom' && !state.settings.voiceprint) {
+    if (on && state.settings.aiPreset !== 'clearcast' && !state.settings.voiceSamples.length) {
       await save({ ai: true, basic: false })
       const ok = await enroll()
       if (!ok) await save({ ai: false })
@@ -670,11 +971,16 @@ async function boot() {
   hydrate()
   state.info = await api.invoke('app:info')
   state.settings = await api.invoke('settings:get')
+  state.gpus = await api.invoke('system:gpus').catch(() => [])
+  if (state.settings.aiPreset === 'heavy' && !gpuQualifies()) {
+    await save({ aiPreset: 'custom' })
+    notice('heavy', { text: 'Custom Heavy needs an NVIDIA graphics card with more than 2 GB of VRAM. Vesper Audio is using Custom instead.' })
+  }
   bindMenus()
   bindControls()
   engine.onSoundEnd = () => renderBoard()
   engine.onVoiceState = s => (state.voice = s)
-  if (state.info.testMode) window.__vesper = { engine, state, api, enroll, installDriver, save, sync, refreshDevices }
+  if (state.info.testMode) window.__vesper = { engine, state, api, enroll, installDriver, save, sync, refreshDevices, config: engineConfig, ensureSpeaker, rebuildPrint, tierOf }
   await refreshDevices()
   state.driver = await api.invoke('driver:status').catch(() => null)
   renderAll()
