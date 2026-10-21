@@ -179,11 +179,14 @@ pub fn install(dir: &str) -> Result<Value, String> {
     if let Err(e) = update {
         return Err(format!("driver install failed: {}", e.message()));
     }
-    let running = nodes()?.found.first().map(|(_, p)| *p == 0).unwrap_or(false);
+    let after = nodes()?;
+    let problem = after.found.first().map(|(_, p)| *p);
+    let running = problem == Some(0);
     Ok(json!({
         "ok": true,
-        "rebootRequired": reboot || needs_reboot.as_bool() || !running,
+        "rebootRequired": (reboot || needs_reboot.as_bool()) && !running,
         "running": running,
+        "problem": problem,
     }))
 }
 
