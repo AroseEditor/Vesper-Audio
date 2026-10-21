@@ -24,7 +24,7 @@ async function createDpdf(msg) {
   ort.env.wasm.numThreads = 1
   ort.env.wasm.proxy = false
   const denoiser = await StreamDenoiser.create(ort, await bytesOf(msg.modelUrl), msg.model, { providers: [msg.provider] })
-  return { hop: denoiser.hop, process: frame => denoiser.process(frame) }
+  return { hop: 480, process: frame => denoiser.process48(frame) }
 }
 
 self.onmessage = async e => {

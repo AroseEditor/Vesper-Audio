@@ -14,7 +14,7 @@ const defaults = {
   aiStrength: 80,
   basic: false,
   basicPreset: 'rnnoise',
-  speexDb: 25,
+  speexDb: -30,
   gains: {},
   boardVolume: 100,
   sounds: [],

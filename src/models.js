@@ -14,6 +14,11 @@ const table = {
     url: 'https://github.com/AroseEditor/Vesper-Audio/releases/download/models-v1/vesper-speaker-small.onnx',
     sha256: '9c6c85d71d0718e62d765387375a10830d4dab03084fe44eb04868d6957484a0'
   },
+  denoiser: {
+    file: 'dpdfnet_baseline.onnx',
+    url: DPDFNET + 'baseline.onnx',
+    sha256: '371d26182aff0e1e0d31354e24c81f79cd57458f5a7dd003fc10a7ebf64255e0'
+  },
   denoiserHeavy: {
     file: 'dpdfnet2_48khz_hr.onnx',
     url: DPDFNET + 'dpdfnet2_48khz_hr.onnx',
@@ -35,7 +40,14 @@ function sha256(file) {
   })
 }
 
-async function ensure(name, emit) {
+const inflight = new Map()
+
+function ensure(name, emit) {
+  if (!inflight.has(name)) inflight.set(name, download(name, emit).finally(() => inflight.delete(name)))
+  return inflight.get(name)
+}
+
+async function download(name, emit) {
   const m = table[name]
   if (!m) throw new Error('unknown model ' + name)
   fs.mkdirSync(dir(), { recursive: true })

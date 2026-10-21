@@ -43,7 +43,8 @@ async function download(url, dest, size, onProgress) {
 function extract(zip, dir) {
   return new Promise((resolve, reject) => {
     fs.mkdirSync(dir, { recursive: true })
-    execFile('tar.exe', ['-xf', zip, '-C', dir], { windowsHide: true }, err => (err ? reject(err) : resolve()))
+    const tar = path.join(process.env.SystemRoot || 'C:/Windows', 'System32', 'tar.exe')
+    execFile(tar, ['-xf', zip, '-C', dir], { windowsHide: true }, err => (err ? reject(err) : resolve()))
   })
 }
 

@@ -1,5 +1,67 @@
 const MODELS = {
-  dpdfnet2_48khz_hr: { win: 960 }
+  dpdfnet_baseline: { win: 320, rate: 16000 },
+  dpdfnet2_48khz_hr: { win: 960, rate: 48000 }
+}
+
+const TAPS = 33
+const HALF_TAPS = (TAPS - 1) / 2
+
+function lowpass(gain) {
+  const fc = 7000 / 48000
+  const k = new Float64Array(TAPS)
+  let sum = 0
+  for (let i = 0; i < TAPS; i++) {
+    const n = i - HALF_TAPS
+    const sinc = n === 0 ? 2 * fc : Math.sin(2 * Math.PI * fc * n) / (Math.PI * n)
+    k[i] = sinc * (0.54 - 0.46 * Math.cos((2 * Math.PI * i) / (TAPS - 1)))
+    sum += k[i]
+  }
+  for (let i = 0; i < TAPS; i++) k[i] = (k[i] * gain) / sum
+  return k
+}
+
+class Down3 {
+  constructor() {
+    this.k = lowpass(1)
+    this.hist = new Float64Array(TAPS - 1)
+  }
+
+  process(input) {
+    const n = input.length
+    const ext = new Float64Array(TAPS - 1 + n)
+    ext.set(this.hist)
+    ext.set(input, TAPS - 1)
+    const out = new Float32Array(n / 3)
+    for (let j = 0; j < out.length; j++) {
+      let acc = 0
+      for (let t = 0; t < TAPS; t++) acc += this.k[t] * ext[3 * j + t]
+      out[j] = acc
+    }
+    this.hist.set(ext.subarray(n))
+    return out
+  }
+}
+
+class Up3 {
+  constructor() {
+    this.k = lowpass(3)
+    this.hist = new Float64Array(TAPS - 1)
+  }
+
+  process(input) {
+    const n = input.length * 3
+    const ext = new Float64Array(TAPS - 1 + n)
+    ext.set(this.hist)
+    for (let i = 0; i < input.length; i++) ext[TAPS - 1 + 3 * i] = input[i]
+    const out = new Float32Array(n)
+    for (let j = 0; j < n; j++) {
+      let acc = 0
+      for (let t = 0; t < TAPS; t++) acc += this.k[t] * ext[j + t]
+      out[j] = acc
+    }
+    this.hist.set(ext.subarray(n))
+    return out
+  }
 }
 
 function readVarint(buf, pos) {
@@ -125,13 +187,17 @@ export class StreamDenoiser {
       executionProviders: options.providers || ['wasm'],
       graphOptimizationLevel: 'all'
     })
-    return new StreamDenoiser(ort, session, onnxMetadata(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)), info.win)
+    return new StreamDenoiser(ort, session, onnxMetadata(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes)), info)
   }
 
-  constructor(ort, session, meta, win) {
+  constructor(ort, session, meta, info) {
+    const win = info.win
     this.ort = ort
     this.session = session
     this.win = win
+    this.rate = info.rate
+    this.down = new Down3()
+    this.up = new Up3()
     this.hop = win / 2
     this.bins = win / 2 + 1
     this.fft = makeFft(win)
@@ -152,10 +218,18 @@ export class StreamDenoiser {
   }
 
   reset() {
+    this.down = new Down3()
+    this.up = new Up3()
     this.state = this.initState.slice()
     this.inBuf = new Float64Array(this.win)
     this.outBuf = new Float64Array(this.win)
     this.primed = 0
+  }
+
+  async process48(hop48) {
+    if (this.rate === 48000) return this.process(hop48)
+    const out = await this.process(this.down.process(hop48))
+    return this.up.process(out)
   }
 
   async process(hopSamples) {

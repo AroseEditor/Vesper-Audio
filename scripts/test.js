@@ -55,7 +55,7 @@ async function launch(userData, wav, env = {}) {
 async function modes(page) {
   const list = [
     ['rnnoise', { ai: false, basic: true, basicPreset: 'rnnoise' }, 10],
-    ['speex', { ai: false, basic: true, basicPreset: 'speex', speexDb: 40 }, 8],
+    ['speex', { ai: false, basic: true, basicPreset: 'speex', speexDb: -40 }, 8],
     ['custom', { ai: true, aiPreset: 'custom', basic: false }, 10],
     ['clearcast', { ai: true, aiPreset: 'clearcast', aiStrength: 100, basic: false }, 10]
   ]
@@ -65,7 +65,7 @@ async function modes(page) {
       await v.save({ ai: false, basic: false })
       await v.save(p)
       await v.sync()
-      await new Promise(res => setTimeout(res, 2500))
+      await new Promise(res => setTimeout(res, 8000))
       let input = 0
       let output = 0
       const n = 60
@@ -98,7 +98,7 @@ async function main() {
 
   await modes(page)
 
-  await page.evaluate(() => window.__vesper.save({ ai: false, basic: false, closeToTray: true, boardVolume: 42, speexDb: 31, aiStrength: 55, basicPreset: 'speex' }))
+  await page.evaluate(() => window.__vesper.save({ ai: false, basic: false, closeToTray: true, boardVolume: 42, speexDb: -31, aiStrength: 55, basicPreset: 'speex' }))
   const sounds = await page.evaluate(() => window.__vesper.api.invoke('sounds:add'))
   check('soundboard imports a sound', sounds.length === 1)
   const played = await page.evaluate(async list => {
@@ -128,7 +128,7 @@ async function main() {
 
   ;({ app, page } = await launch(userData, noiseWav))
   const saved = await page.evaluate(() => window.__vesper.api.invoke('settings:get'))
-  check('settings survive a restart', saved.boardVolume === 42 && saved.speexDb === 31 && saved.aiStrength === 55 && saved.basicPreset === 'speex' && saved.sounds.length === 1)
+  check('settings survive a restart', saved.boardVolume === 42 && saved.speexDb === -31 && saved.aiStrength === 55 && saved.basicPreset === 'speex' && saved.sounds.length === 1)
   await app.close()
 
   fs.rmSync(work, { recursive: true, force: true })

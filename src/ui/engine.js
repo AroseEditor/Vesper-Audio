@@ -4,9 +4,13 @@ import { VoiceGate } from './voice.js'
 const SPEEX_ID = '@sapphi-red/web-noise-suppressor/speex'
 const HOP = 480
 const PREBUFFER_HOPS = 2
-const DFN3_DRY_DELAY = 0.05
+const DFN3_DRY_DELAY = 0.052
+const DPDFNET_DRY_DELAY = 0.082
 const MAX_ATTENUATION_DB = 45
-const MAKEUP_DB = { rnnoise: 7, speex: 2, dfn3: 0, heavy: 0 }
+const MAKEUP_DB = { rnnoise: 7, speex: 2, dfn3: 0, dpdfnet: 0 }
+const WATCH_MS = 2000
+const WATCH_WARMUP_S = 8
+const WATCH_STRIKES = 3
 const db = v => Math.pow(10, v / 20)
 const asset = file => new URL(file, import.meta.url).href
 
@@ -56,7 +60,9 @@ export class Engine {
     this.onSoundEnd = () => {}
     this.onVoiceState = () => {}
     this.stats = { underruns: 0, queued: 0, backlog: 0 }
-    this.state = { running: false, hasCable: false, error: '', warning: '' }
+    this.forceLight = false
+    this.watch = null
+    this.state = { running: false, hasCable: false, error: '', warning: '', denoiser: '' }
   }
 
   apply(cfg) {
@@ -170,20 +176,13 @@ export class Engine {
   async chain(cfg) {
     const mode = modeOf(cfg)
     const ctx = this.ctx
-    if (mode !== this.mode || (mode === 'heavy' && this.heavyKey !== cfg.heavyDenoiserUrl)) {
+    if (mode !== this.mode || this.denoiserKey !== (mode === 'heavy' ? cfg.denoiserHeavyUrl : cfg.denoiserUrl)) {
       this.teardownFx()
       this.mode = mode
-      this.state.warning = ''
-      try {
-        await this.buildFx(mode, cfg)
-      } catch (err) {
-        if (mode !== 'heavy') throw err
-        this.teardownFx()
-        this.state.warning = 'Heavy model could not start (' + String((err && err.message) || err) + '). Using Custom instead.'
-        await this.buildFx('custom', cfg)
-      }
+      if (!this.forceLight) this.state.warning = ''
+      await this.buildFx(mode, cfg)
     }
-    if (mode === 'speex' && this.fxNodes.speex) this.fxNodes.speex.port.postMessage(-Math.round(cfg.speexDb))
+    if (mode === 'speex' && this.fxNodes.speex) this.fxNodes.speex.port.postMessage(Math.round(cfg.speexDb))
     if (mode === 'clearcast' && this.fxNodes.wet) {
       const k = leak(cfg.aiStrength)
       this.fxNodes.wet.gain.setTargetAtTime(1 - k, ctx.currentTime, 0.02)
@@ -245,33 +244,35 @@ export class Engine {
     const ctx = this.ctx
     const add = (...nodes) => this.fx.push(...nodes)
     this.active = mode
-    this.heavyKey = mode === 'heavy' ? cfg.heavyDenoiserUrl : ''
-    this.fxOut.gain.value = db(MAKEUP_DB[mode === 'clearcast' || mode === 'custom' ? 'dfn3' : mode] || 0)
+    this.denoiserKey = mode === 'heavy' ? cfg.denoiserHeavyUrl : cfg.denoiserUrl
+    this.state.denoiser = ''
+    this.fxOut.gain.value = 1
     if (mode === 'off') {
       this.fxIn.connect(this.fxOut)
     } else if (mode === 'rnnoise') {
+      this.fxOut.gain.value = db(MAKEUP_DB.rnnoise)
       const node = new RnnoiseWorkletNode(ctx, { maxChannels: 1, wasmBinary: await this.wasmBinary('rnnoise') })
       this.fxIn.connect(node).connect(this.fxOut)
       add(node)
       this.fxNodes = { rnnoise: node }
     } else if (mode === 'speex') {
+      this.fxOut.gain.value = db(MAKEUP_DB.speex)
       const node = new AudioWorkletNode(ctx, SPEEX_ID, {
         channelCount: 1,
         channelCountMode: 'explicit',
-        processorOptions: { maxChannels: 1, wasmBinary: await this.wasmBinary('speex'), noiseSuppress: -Math.round(cfg.speexDb) }
+        processorOptions: { maxChannels: 1, wasmBinary: await this.wasmBinary('speex'), noiseSuppress: Math.round(cfg.speexDb) }
       })
       this.fxIn.connect(node).connect(this.fxOut)
       add(node)
       this.fxNodes = { speex: node }
     } else {
-      const node =
-        mode === 'heavy'
-          ? await this.denoiser({ backend: 'dpdfnet', model: 'dpdfnet2_48khz_hr', modelUrl: cfg.heavyDenoiserUrl, provider: 'wasm' })
-          : await this.denoiser({ backend: 'dfn3' })
+      const { node, kind } = await this.aiDenoiser(cfg)
+      this.state.denoiser = kind
+      this.fxOut.gain.value = db(MAKEUP_DB[kind])
       const wet = ctx.createGain()
       const dry = ctx.createGain()
       const delay = ctx.createDelay(0.5)
-      delay.delayTime.value = DFN3_DRY_DELAY
+      delay.delayTime.value = kind === 'dpdfnet' ? DPDFNET_DRY_DELAY : DFN3_DRY_DELAY
       const k = mode === 'clearcast' ? leak(cfg.aiStrength) : 0
       wet.gain.value = 1 - k
       dry.gain.value = k
@@ -279,10 +280,53 @@ export class Engine {
       this.fxIn.connect(delay).connect(dry).connect(this.fxOut)
       add(node, wet, dry, delay)
       this.fxNodes = { denoise: node, wet, dry }
+      if (kind === 'dpdfnet') this.startWatch()
     }
   }
 
+  async aiDenoiser(cfg) {
+    const heavy = this.active === 'heavy'
+    const url = heavy ? cfg.denoiserHeavyUrl : cfg.denoiserUrl
+    if (url && !this.forceLight) {
+      try {
+        const model = heavy ? 'dpdfnet2_48khz_hr' : 'dpdfnet_baseline'
+        return { node: await this.denoiser({ backend: 'dpdfnet', model, modelUrl: url, provider: 'wasm' }), kind: 'dpdfnet' }
+      } catch (err) {
+        this.state.warning = 'The main AI model could not start (' + String((err && err.message) || err) + '). Using the built-in light model.'
+      }
+    } else if (!this.forceLight) {
+      this.state.warning = 'The main AI model is not downloaded yet. Using the built-in light model.'
+    }
+    return { node: await this.denoiser({ backend: 'dfn3' }), kind: 'dfn3' }
+  }
+
+  startWatch() {
+    this.stopWatch()
+    let strikes = 0
+    let seen = 0
+    let last = this.stats.underruns
+    this.watch = setInterval(() => {
+      seen += WATCH_MS / 1000
+      const delta = this.stats.underruns - last
+      last = this.stats.underruns
+      if (seen < WATCH_WARMUP_S) return
+      strikes = this.stats.backlog >= 4 || delta > 2400 ? strikes + 1 : 0
+      if (strikes < WATCH_STRIKES) return
+      this.forceLight = true
+      this.state.warning = 'Your CPU could not keep up with the main AI model, so Vesper Audio switched to the built-in light model.'
+      this.stopWatch()
+      this.mode = ''
+      if (this.cfg) this.apply(this.cfg)
+    }, WATCH_MS)
+  }
+
+  stopWatch() {
+    if (this.watch) clearInterval(this.watch)
+    this.watch = null
+  }
+
   teardownFx() {
+    this.stopWatch()
     for (const dispose of this.disposers) dispose()
     this.disposers = []
     for (const n of this.fx) {

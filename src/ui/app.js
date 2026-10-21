@@ -30,12 +30,15 @@ const state = {
   speakerLoading: {},
   gpus: [],
   devicesKey: '',
-  heavyUrl: '',
+  denoiserUrl: '',
+  denoiserHeavyUrl: '',
   notices: {},
   info: { version: '', testMode: false },
   voice: null,
   busy: false
 }
+
+const reason = err => String((err && err.message) || err).replace(/^Error invoking remote method '[^']*': (Error: )?/, '')
 
 function h(tag, props = {}, ...kids) {
   const el = document.createElement(tag)
@@ -96,7 +99,8 @@ function engineConfig() {
     boardVolume: s.boardVolume,
     voiceprint: s.voiceprints[tier] || null,
     speaker: loaded ? loaded.speaker : null,
-    heavyDenoiserUrl: state.heavyUrl
+    denoiserUrl: state.denoiserUrl,
+    denoiserHeavyUrl: state.denoiserHeavyUrl
   }
 }
 
@@ -122,12 +126,26 @@ function sync() {
 
 async function prepare() {
   const s = state.settings
-  if (!s.ai || s.aiPreset === 'clearcast') return
+  if (!s.ai) return
   try {
-    if (s.aiPreset === 'heavy' && !state.heavyUrl) {
-      notice('voice', { text: 'Downloading the Heavy denoiser' })
-      state.heavyUrl = await api.invoke('model:ensure', 'denoiserHeavy')
+    if (!state.denoiserUrl) {
+      notice('voice', { text: 'Downloading the AI model' })
+      state.denoiserUrl = await api.invoke('model:ensure', 'denoiser')
     }
+    if (s.aiPreset === 'heavy' && !state.denoiserHeavyUrl) {
+      notice('voice', { text: 'Downloading the Heavy AI model' })
+      state.denoiserHeavyUrl = await api.invoke('model:ensure', 'denoiserHeavy')
+    }
+  } catch (err) {
+    state.denoiserUrl = ''
+    notice('voice', { text: 'The AI model could not be downloaded, using the built-in light model: ' + reason(err) })
+    return
+  }
+  if (s.aiPreset === 'clearcast') {
+    notice('voice', null)
+    return
+  }
+  try {
     if (s.voiceSamples.length) {
       const tier = tierOf()
       notice('voice', { text: 'Preparing your voice model' })
@@ -135,7 +153,7 @@ async function prepare() {
       if (!s.voiceprints[tier]) await rebuildPrint(tier)
     }
   } catch (err) {
-    notice('voice', { text: 'Voice model unavailable: ' + err.message })
+    notice('voice', { text: 'Voice model unavailable: ' + reason(err) })
     return
   }
   notice('voice', null)
@@ -164,7 +182,7 @@ async function ensureSpeaker(tier) {
           state.speakers.heavy = { speaker }
           return speaker
         } catch (err) {
-          notice('heavy', { text: 'Heavy voice model could not use the graphics card (' + err.message + '). Using the standard voice model.' })
+          notice('heavy', { text: 'Heavy voice model could not use the graphics card (' + reason(err) + '). Using the standard voice model.' })
         }
       }
       const speaker = await loadSpeaker(await api.invoke('model:ensure', 'speakerSmall'), 'wasm')
@@ -179,7 +197,7 @@ async function rebuildPrint(tier, onProgress) {
   const speaker = await ensureSpeaker(tier)
   const samples = await api.invoke('voice:load')
   const progress = onProgress || (p => notice('voice', { text: 'Learning your voice ' + Math.round(p * 100) + '%' }))
-  const print = await buildPrint(speaker, samples.map(x => bytesToPcm(x.bytes)), progress)
+  const print = await buildPrint(speaker, samples.map(x => bytesToPcm(x.bytes)), progress, tier === 'heavy' ? 0.4 : 0.42)
   state.settings.voiceprints = { ...state.settings.voiceprints, [tier]: print }
   await save({ voiceprints: state.settings.voiceprints })
 }
@@ -315,8 +333,8 @@ function renderHome() {
   menuItems(
     document.querySelector('[data-select="ai-preset"] .menu'),
     [
-      { value: 'custom', label: 'Custom', tag: 'light', small: 'Speak a paragraph once and the AI learns your voice. It keeps your voice and laughs and drops everything else. About 16 MB, runs on the CPU.' },
-      { value: 'heavy', label: 'Custom Heavy', tag: 'NVIDIA GPU', small: 'Larger models and a graphics card voice lock for the most accurate result. For PCs with an NVIDIA graphics card above 2 GB VRAM. About 130 MB.' },
+      { value: 'custom', label: 'Custom', tag: 'light', small: 'Speak a paragraph once and the AI learns your voice. It keeps your voice and laughs and drops everything else. About 17 MB, runs on the CPU.' },
+      { value: 'heavy', label: 'Custom Heavy', tag: 'NVIDIA GPU', small: 'A much larger voice-lock model on your graphics card for the most accurate result. Fullband 48 kHz denoising plus the graphics card voice lock. For PCs with an NVIDIA graphics card above 2 GB VRAM. About 125 MB.' },
       { value: 'clearcast', label: 'ClearCast', small: 'Studio-grade AI speech cleanup in the style of SteelSeries Sonar. Strength is adjustable.' }
     ],
     s.aiPreset,
@@ -333,8 +351,8 @@ function renderHome() {
   menuItems(
     document.querySelector('[data-select="basic-preset"] .menu'),
     [
-      { value: 'speex', label: 'Speex', small: 'Classic DSP suppressor with an adjustable suppression level in dB.' },
-      { value: 'rnnoise', label: 'RNNoise', small: 'Lightweight neural noise suppressor.' }
+      { value: 'speex', label: 'Speex', small: 'Low CPU usage, low quality. Suppression Level from -60 dB (strongest) to 0 dB (off).' },
+      { value: 'rnnoise', label: 'RNNoise', small: 'Good quality, more CPU usage.' }
     ],
     s.basicPreset,
     async v => {
@@ -461,7 +479,7 @@ async function refreshDevices() {
   try {
     next = await api.invoke('devices:list')
   } catch (err) {
-    notice('devices', { text: 'Could not read Windows audio devices: ' + err.message })
+    notice('devices', { text: 'Could not read Windows audio devices: ' + reason(err) })
     return
   }
   notice('devices', null)
@@ -512,13 +530,15 @@ async function chooseHeavy() {
       $('dlg-body').replaceChildren(text, h('div', { class: 'progress' }, bar))
       $('dlg-actions').replaceChildren()
       try {
-        state.heavyUrl = await api.invoke('model:ensure', 'denoiserHeavy')
+        state.denoiserUrl = await api.invoke('model:ensure', 'denoiser')
+        bar.style.width = '0%'
+        state.denoiserHeavyUrl = await api.invoke('model:ensure', 'denoiserHeavy')
         bar.style.width = '0%'
         await api.invoke('model:ensure', 'speakerHeavy')
       } catch (err) {
         off()
         $('dlg-title').textContent = 'Heavy models could not be downloaded'
-        $('dlg-body').replaceChildren(h('p', { class: 'error', text: err.message }))
+        $('dlg-body').replaceChildren(h('p', { class: 'error', text: reason(err) }))
         $('dlg-actions').replaceChildren(h('button', { class: 'btn', type: 'button', text: 'Close', onclick: () => finish(false) }))
         return
       }
@@ -541,9 +561,9 @@ async function chooseHeavy() {
     dialog({
       title: 'Custom Heavy',
       body: [
-        h('p', { text: 'Custom Heavy uses larger AI models and runs the voice lock on your graphics card for the most accurate result. It is made for PCs with an NVIDIA graphics card that has more than 2 GB of VRAM.' }),
+        h('p', { text: 'Custom Heavy adds a much larger voice-lock model that runs on your NVIDIA graphics card, so it can check who is speaking far faster than a processor could. It is made for PCs with an NVIDIA graphics card that has more than 2 GB of VRAM.' }),
         h('p', { class: ok ? 'ok' : 'error', text: ok ? 'Detected: ' + detected : g ? detected + ' Heavy needs more than 2 GB.' : detected }),
-        h('p', { class: 'muted', text: 'About 130 MB is downloaded once.' })
+        h('p', { class: 'muted', text: 'About 125 MB is downloaded once.' })
       ],
       actions: [
         { label: 'Cancel', onClick: () => finish(false) },
@@ -567,7 +587,7 @@ async function enroll() {
     await ensureSpeaker(tierOf())
   } catch (err) {
     off()
-    dialog({ title: 'Voice model unavailable', body: h('p', { class: 'error', text: err.message }), actions: [{ label: 'Close', onClick: closeDialog }] })
+    dialog({ title: 'Voice model unavailable', body: h('p', { class: 'error', text: reason(err) }), actions: [{ label: 'Close', onClick: closeDialog }] })
     return false
   }
   off()
@@ -613,7 +633,8 @@ async function enroll() {
       if (enroller) enroller.stop()
       enroller = null
       closeDialog()
-      sync().then(() => resolve(ok))
+      resolve(ok)
+      sync()
     }
     let finishNow = null
     const begin = () => {
@@ -657,7 +678,7 @@ async function enroll() {
         close(true)
       } catch (err) {
         status.className = 'error'
-        status.textContent = err.message
+        status.textContent = reason(err)
         $('dlg-actions').replaceChildren(
           h('button', { class: 'btn', type: 'button', text: 'Close', onclick: () => close(false) }),
           h('button', {
@@ -792,7 +813,7 @@ async function uninstallDriver() {
             $('dlg-body').replaceChildren(h('p', { text: 'The virtual microphone is no longer installed.' }))
           } catch (err) {
             $('dlg-title').textContent = 'Could not remove the driver'
-            $('dlg-body').replaceChildren(h('p', { class: 'error', text: err.message }))
+            $('dlg-body').replaceChildren(h('p', { class: 'error', text: reason(err) }))
           }
           $('dlg-actions').replaceChildren(closeButton)
           await refreshDevices()
@@ -859,7 +880,7 @@ async function installDriver() {
       }
     } catch (err) {
       off()
-      finishDialog('Driver setup failed', h('p', { class: 'error', text: err.message }), [closeButton])
+      finishDialog('Driver setup failed', h('p', { class: 'error', text: reason(err) }), [closeButton])
     }
     await refreshDevices()
     await refreshDriver()
@@ -887,7 +908,7 @@ async function playSound(s) {
   try {
     await engine.toggleSound(s.id, `vesper://sounds/${s.id}.mp3`, s.volume)
   } catch (err) {
-    notice('sound', { text: 'Could not play sound: ' + err.message })
+    notice('sound', { text: 'Could not play sound: ' + reason(err) })
     setTimeout(() => notice('sound', null), 4000)
   }
   renderBoard()
@@ -954,7 +975,7 @@ function bindControls() {
     if (!d) return
     d.volume = Number(e.target.value)
     clearTimeout(levelTimer)
-    levelTimer = setTimeout(() => api.invoke('device:volume', d.id, d.volume).catch(err => notice('props', { text: err.message })), 40)
+    levelTimer = setTimeout(() => api.invoke('device:volume', d.id, d.volume).catch(err => notice('props', { text: reason(err) })), 40)
   })
   $('gain').addEventListener('input', async e => {
     fill(e.target)
@@ -971,7 +992,7 @@ function bindControls() {
       await api.invoke('device:listen', d.id, e.target.checked)
       notice('props', null)
     } catch (err) {
-      notice('props', { text: 'Windows would not change Listen to this device: ' + err.message })
+      notice('props', { text: 'Windows would not change Listen to this device: ' + reason(err) })
     }
     await refreshDevices()
   })
@@ -982,7 +1003,7 @@ function bindControls() {
       await api.invoke('device:sysfx', d.id, e.target.checked)
       notice('props', null)
     } catch (err) {
-      notice('props', { text: 'Windows would not change audio enhancements: ' + err.message })
+      notice('props', { text: 'Windows would not change audio enhancements: ' + reason(err) })
     }
     await refreshDevices()
   })
@@ -1015,6 +1036,7 @@ async function boot() {
   hydrate()
   state.info = await api.invoke('app:info')
   state.settings = await api.invoke('settings:get')
+  if (state.settings.speexDb > 0) await save({ speexDb: -state.settings.speexDb })
   state.gpus = await api.invoke('system:gpus').catch(() => [])
   if (state.settings.aiPreset === 'heavy' && !gpuQualifies()) {
     await save({ aiPreset: 'custom' })
@@ -1046,5 +1068,5 @@ async function boot() {
 
 boot().catch(err => {
   api.invoke('app:log', 'boot failed: ' + (err && err.stack ? err.stack : err))
-  notice('boot', { text: 'Vesper Audio failed to start: ' + err.message })
+  notice('boot', { text: 'Vesper Audio failed to start: ' + reason(err) })
 })

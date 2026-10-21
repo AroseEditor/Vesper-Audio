@@ -214,11 +214,17 @@ export function bytesToPcm(buffer) {
   return Float32Array.from(src, v => v / 32767)
 }
 
-export async function buildPrint(speaker, segments, onProgress = () => {}) {
+function meanUnit(list) {
+  const mean = new Float32Array(list[0].length)
+  for (const e of list) for (let i = 0; i < mean.length; i++) mean[i] += e[i]
+  return unit(mean)
+}
+
+export async function buildPrint(speaker, segments, onProgress = () => {}, cap = 0.42) {
   const win = Math.round(WINDOW_SECONDS * RATE)
   const hop = Math.round(win / 2)
   const centroids = []
-  const sims = []
+  const heldOut = []
   let total = 0
   for (const audio of segments) total += Math.max(0, Math.floor((audio.length - win) / hop) + 1)
   let done = 0
@@ -230,22 +236,24 @@ export async function buildPrint(speaker, segments, onProgress = () => {}) {
       onProgress(++done / Math.max(1, total))
     }
     if (embeddings.length < 4) continue
-    const mean = new Float32Array(embeddings[0].length)
-    for (const e of embeddings) for (let i = 0; i < mean.length; i++) mean[i] += e[i]
-    const centroid = unit(mean)
-    centroids.push(centroid)
-    for (const e of embeddings) sims.push(cosine(e, centroid))
+    centroids.push(meanUnit(embeddings))
+    const even = embeddings.filter((_, i) => i % 2 === 0)
+    const odd = embeddings.filter((_, i) => i % 2 === 1)
+    const evenCentroid = meanUnit(even)
+    const oddCentroid = meanUnit(odd)
+    for (const e of odd) heldOut.push(cosine(e, evenCentroid))
+    for (const e of even) heldOut.push(cosine(e, oddCentroid))
   }
   if (!centroids.length) throw new Error('Not enough speech was captured. Please read the paragraph again.')
-  const mu = sims.reduce((a, b) => a + b, 0) / sims.length
-  const sigma = Math.sqrt(sims.reduce((a, b) => a + (b - mu) ** 2, 0) / sims.length)
+  const mu = heldOut.reduce((a, b) => a + b, 0) / heldOut.length
+  const sigma = Math.sqrt(heldOut.reduce((a, b) => a + (b - mu) ** 2, 0) / heldOut.length)
   return {
     id: crypto.randomUUID(),
     centroids: centroids.map(c => Array.from(c)),
-    thr: Math.min(0.5, Math.max(0.35, mu - 2.5 * sigma)),
+    thr: Math.min(cap, Math.max(0.3, mu - 2.5 * sigma)),
     mu,
     sigma,
-    windows: sims.length,
+    windows: heldOut.length,
     created: Date.now()
   }
 }
@@ -286,6 +294,7 @@ export class VoiceGate {
     this.printId = voiceprint.id
     this.thr = voiceprint.thr
     this.speaker = speaker
+    this.quick = speaker.provider !== 'webgpu'
     this.onState = onState
     this.ring = new Float32Array(Math.round(RATE * 3))
     this.flags = []
@@ -326,21 +335,24 @@ export class VoiceGate {
     } else {
       this.silence += CHUNK_SECONDS
     }
-    if (++this.tick % 3 === 0) this.verify()
+    if (++this.tick % (this.verdict === 'unknown' ? 2 : 4) === 0) this.verify()
     this.decide()
   }
 
   async verify() {
     if (this.busy || !this.tap) return
-    if (this.flags.filter(Boolean).length < 8) return
+    const speechChunks = this.flags.filter(Boolean).length
+    if (speechChunks < (this.quick ? 5 : 8)) return
+    const short = this.quick && speechChunks < 8
+    const n = Math.round((short ? 1 : WINDOW_SECONDS) * RATE)
+    const thr = short ? this.thr - 0.05 : this.thr
     this.busy = true
     try {
-      const n = Math.round(WINDOW_SECONDS * RATE)
       const emb = await this.speaker.embed(this.ring.subarray(this.ring.length - n))
       this.sim = Math.max(...this.centroids.map(c => cosine(emb, c)))
       const was = this.verdict
-      if (this.sim >= this.thr) this.verdict = 'me'
-      else if (was !== 'me' || this.sim < this.thr - 0.05) this.verdict = 'other'
+      if (this.sim >= thr) this.verdict = 'me'
+      else if (was !== 'me' || this.sim < thr - 0.05) this.verdict = 'other'
       if (this.verdict === 'other') this.lastOtherAt = this.t
     } catch {
     } finally {
@@ -349,7 +361,7 @@ export class VoiceGate {
   }
 
   decide() {
-    const grace = this.t - this.lastOtherAt < 4 ? 0.25 : 0.8
+    const grace = this.quick && this.t - this.lastOtherAt < 4 ? 0.4 : 0.8
     let open
     if (this.silence > 0.4) open = false
     else if (this.verdict === 'me') open = true
