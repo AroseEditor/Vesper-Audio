@@ -98,6 +98,7 @@ jobs:
           Compress-Archive -Path pkg\* -DestinationPath VesperAudioCable-x64.zip -Force
           $hash = (Get-FileHash VesperAudioCable-x64.zip -Algorithm SHA256).Hash.ToLower()
           Set-Content -Path VesperAudioCable-x64.zip.sha256 -Value "$hash  VesperAudioCable-x64.zip" -NoNewline
+          Copy-Item driver\VesperAudioCable.cer VesperAudioCable.cer
 
       - uses: actions/upload-artifact@v4
         with:
@@ -105,7 +106,7 @@ jobs:
           path: |
             VesperAudioCable-x64.zip
             VesperAudioCable-x64.zip.sha256
-            driver/VesperAudioCable.cer
+            VesperAudioCable.cer
 
   app:
     if: github.event.inputs.target == '' || github.event.inputs.target == 'all' || github.event.inputs.target == 'app'
