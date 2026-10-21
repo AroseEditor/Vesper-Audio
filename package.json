@@ -1,0 +1,60 @@
+{
+  "name": "vesper-audio",
+  "version": "0.1.0",
+  "description": "Vesper Audio",
+  "main": "src/main.js",
+  "author": "Ayush.ue5",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "postinstall": "node scripts/vendor.js",
+    "start": "electron .",
+    "helper": "cargo build --release --manifest-path helper/Cargo.toml",
+    "test": "node scripts/test.js",
+    "dist": "electron-builder --win nsis portable --publish never"
+  },
+  "devDependencies": {
+    "@fontsource/inter": "^5.3.0",
+    "@sapphi-red/web-noise-suppressor": "^0.4.1",
+    "electron": "^45.0.0",
+    "electron-builder": "^26.15.3",
+    "onnxruntime-web": "^1.30.0",
+    "playwright-core": "^1.64.1"
+  },
+  "build": {
+    "appId": "com.ayushue5.vesperaudio",
+    "productName": "Vesper Audio",
+    "artifactName": "Vesper-Audio-${version}-${target}.${ext}",
+    "directories": {
+      "output": "dist"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "helper/target/release/vesper-helper.exe",
+        "to": "vesper-helper.exe"
+      }
+    ],
+    "win": {
+      "icon": "icon.png",
+      "target": [
+        "nsis",
+        "portable"
+      ],
+      "requestedExecutionLevel": "asInvoker"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "runAfterFinish": true
+    },
+    "portable": {
+      "artifactName": "Vesper-Audio-${version}-portable.${ext}"
+    }
+  }
+}
