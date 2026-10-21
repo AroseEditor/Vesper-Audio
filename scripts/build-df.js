@@ -26,13 +26,23 @@ function ensureTools() {
   run('rustup', ['target', 'add', 'wasm32-unknown-unknown'])
 }
 
-function checkout() {
-  fs.mkdirSync(cache, { recursive: true })
-  if (!fs.existsSync(repo)) {
-    run('git', ['clone', '--filter=blob:none', 'https://github.com/Rikorose/DeepFilterNet.git', repo])
+function head() {
+  try {
+    return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repo, encoding: 'utf8' }).trim()
+  } catch {
+    return ''
   }
+}
+
+function checkout() {
+  fs.mkdirSync(repo, { recursive: true })
+  if (!fs.existsSync(path.join(repo, '.git'))) {
+    run('git', ['init', '-q'], { cwd: repo })
+    run('git', ['remote', 'add', 'origin', 'https://github.com/Rikorose/DeepFilterNet.git'], { cwd: repo })
+  }
+  if (head() === COMMIT) return
   run('git', ['fetch', '--depth', '1', 'origin', COMMIT], { cwd: repo })
-  run('git', ['checkout', '--force', COMMIT], { cwd: repo })
+  run('git', ['checkout', '--force', 'FETCH_HEAD'], { cwd: repo })
 }
 
 function build() {
