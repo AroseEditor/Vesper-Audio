@@ -1,0 +1,182 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to use when publishing
+        required: false
+        default: v0.0.0-test
+      publish:
+        description: Publish a release from this run
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event.inputs.tag || github.ref_name }}
+
+jobs:
+  driver:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Install Windows Driver Kit
+        run: |
+          choco install windowsdriverkit11 -y --no-progress
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+
+      - name: Work around InfVerif layout
+        run: |
+          $kits = 'C:\Program Files (x86)\Windows Kits\10\bin'
+          Get-ChildItem -Path $kits -Directory | ForEach-Object {
+            $x86 = Join-Path $_.FullName 'x86'
+            if (Test-Path $x86) {
+              $inner = Join-Path $x86 'x86'
+              New-Item -ItemType Directory -Force -Path $inner | Out-Null
+              foreach ($f in 'infverif.dll', 'InfVerif.exe') {
+                $src = Join-Path $x86 $f
+                if (Test-Path $src) { Copy-Item $src $inner -Force }
+              }
+            }
+          }
+
+      - name: Build driver
+        run: msbuild driver\VesperAudioCable.sln /p:Configuration=Release /p:Platform=x64 /p:SignMode=Off /p:EnableInf2cat=false /m
+
+      - name: Locate build output
+        id: out
+        run: |
+          $sys = Get-ChildItem -Path driver, x64 -Recurse -Filter vesperaudiocable.sys -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'Release' } | Select-Object -First 1
+          if (-not $sys) { Get-ChildItem -Recurse -Filter *.sys | Select-Object FullName; throw 'driver binary not found' }
+          $inf = Get-ChildItem -Path $sys.Directory.FullName -Filter vesperaudiocable.inf
+          if (-not $inf) { $inf = Get-ChildItem -Path . -Recurse -Filter vesperaudiocable.inf | Where-Object { $_.FullName -match 'Release' } | Select-Object -First 1 }
+          if (-not $inf) { throw 'driver inf not found' }
+          New-Item -ItemType Directory -Force -Path pkg | Out-Null
+          Copy-Item $sys.FullName pkg\VesperAudioCable.sys
+          Copy-Item $inf.FullName pkg\VesperAudioCable.inf
+          Copy-Item driver\VesperAudioCable.cer pkg\VesperAudioCable.cer
+          Get-ChildItem pkg
+
+      - name: Sign driver and create catalog
+        env:
+          PFX: ${{ secrets.VAC_SIGN_PFX }}
+          PFX_PASSWORD: ${{ secrets.VAC_SIGN_PASSWORD }}
+        run: |
+          [IO.File]::WriteAllBytes("$PWD\vac.pfx", [Convert]::FromBase64String($env:PFX))
+          $bin = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\10.*\x64' -Directory -ErrorAction SilentlyContinue | Out-Null
+          $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe' | Sort-Object FullName | Select-Object -Last 1
+          $inf2cat = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin\*\x86\inf2cat.exe' | Sort-Object FullName | Select-Object -Last 1
+          if (-not $signtool -or -not $inf2cat) { throw 'signing tools not found' }
+          & $signtool.FullName sign /f vac.pfx /p $env:PFX_PASSWORD /fd SHA256 pkg\VesperAudioCable.sys
+          if ($LASTEXITCODE -ne 0) { throw 'signing the driver failed' }
+          & $inf2cat.FullName /driver:pkg /os:10_X64 /uselocaltime
+          if ($LASTEXITCODE -ne 0) { throw 'inf2cat failed' }
+          $cat = Get-ChildItem pkg -Filter *.cat | Select-Object -First 1
+          if ($cat.Name -ne 'VesperAudioCable.cat') { Rename-Item $cat.FullName VesperAudioCable.cat }
+          & $signtool.FullName sign /f vac.pfx /p $env:PFX_PASSWORD /fd SHA256 pkg\VesperAudioCable.cat
+          if ($LASTEXITCODE -ne 0) { throw 'signing the catalog failed' }
+          Remove-Item vac.pfx -Force
+          Get-ChildItem pkg
+
+      - name: Archive driver package
+        run: |
+          Compress-Archive -Path pkg\* -DestinationPath VesperAudioCable-x64.zip -Force
+          $hash = (Get-FileHash VesperAudioCable-x64.zip -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path VesperAudioCable-x64.zip.sha256 -Value "$hash  VesperAudioCable-x64.zip" -NoNewline
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: driver
+          path: |
+            VesperAudioCable-x64.zip
+            VesperAudioCable-x64.zip.sha256
+            driver/VesperAudioCable.cer
+
+  app:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            helper
+            .cache/DeepFilterNet
+
+      - name: Cache wasm-bindgen
+        id: bindgen
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/wasm-bindgen.exe
+          key: wasm-bindgen-0.2.92-${{ runner.os }}
+
+      - name: Install wasm-bindgen
+        if: steps.bindgen.outputs.cache-hit != 'true'
+        run: cargo install wasm-bindgen-cli --version 0.2.92 --locked
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build DeepFilterNet runtime
+        run: npm run build:df
+
+      - name: Build Windows helper
+        run: npm run helper
+
+      - name: Package app
+        run: npm run dist
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app
+          path: |
+            dist/Vesper-Audio-Setup-*.exe
+            dist/Vesper-Audio-*-portable.exe
+
+  publish:
+    needs: [driver, app]
+    if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+
+      - name: List assets
+        run: ls -la assets
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: Vesper Audio ${{ env.TAG }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            assets/Vesper-Audio-Setup-*.exe
+            assets/Vesper-Audio-*-portable.exe
+            assets/VesperAudioCable-x64.zip
+            assets/VesperAudioCable-x64.zip.sha256
+            assets/VesperAudioCable.cer
