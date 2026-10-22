@@ -248,9 +248,9 @@ pub fn rename(id: &str, name: &str, adapter: &str, icon: &str) -> Result<Value, 
     policy_text(id, &KEY_DEVICE_DESC, name)?;
     if !adapter.is_empty() {
         policy_text(id, &KEY_ADAPTER_NAME, adapter)?;
-        policy_text(id, &KEY_FRIENDLY_NAME, &format!("{name} ({adapter})"))?;
+        let _ = policy_text(id, &KEY_FRIENDLY_NAME, &format!("{name} ({adapter})"));
     } else {
-        policy_text(id, &KEY_FRIENDLY_NAME, name)?;
+        let _ = policy_text(id, &KEY_FRIENDLY_NAME, name);
     }
     if !icon.is_empty() {
         policy_text(id, &KEY_ICON_PATH, icon)?;
