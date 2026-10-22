@@ -39,6 +39,7 @@ this.rp=0;
 this.wp=0;
 this.avail=0;
 this.primed=false;
+this.total=0;
 this.state=null;
 this.destroyed=false;
 this.port.onmessage=e=>{if(e.data==='destroy')this.destroy();else if(typeof e.data==='number')this.level=e.data};
@@ -49,6 +50,7 @@ const input=inputs[0]&&inputs[0][0];
 const output=outputs[0]&&outputs[0][0];
 if(!output)return !this.destroyed;
 const n=output.length;
+this.total+=n;
 if(input&&this.state){
 for(let i=0;i<n;i++){
 const v=input[i];
@@ -62,7 +64,7 @@ this.fill=0
 }
 }
 }
-if(!this.primed&&this.avail>=FRAME+n)this.primed=true;
+if(!this.primed&&this.total>=FRAME+n&&this.avail>=n)this.primed=true;
 if(this.primed&&this.avail>=n){
 for(let i=0;i<n;i++){output[i]=this.ring[this.rp];this.rp=(this.rp+1)%RING}
 this.avail-=n
@@ -82,5 +84,8 @@ const endMarker = 'registerProcessor(`@sapphi-red/web-noise-suppressor/speex`,c)
 const start = speexSrc.indexOf(startMarker)
 const end = speexSrc.indexOf(endMarker)
 if (start < 0 || end < start) throw new Error('speex worklet layout changed, cannot rebuild the OBS processor')
-const rebuilt = speexSrc.slice(0, start) + obsSpeex + speexSrc.slice(end + endMarker.length)
+const zeroPart = fs.readFileSync(path.join(__dirname, 'zero-speex.part.js'), 'utf8')
+const registerObs = "registerProcessor('@sapphi-red/web-noise-suppressor/speex',ObsSpeex);"
+const withZero = obsSpeex.replace(registerObs, zeroPart + '\n' + registerObs + "\nregisterProcessor('vesper-speex-zero',ZeroSpeex);")
+const rebuilt = speexSrc.slice(0, start) + withZero + speexSrc.slice(end + endMarker.length)
 fs.writeFileSync(path.join(out, 'speex.worklet.js'), rebuilt)

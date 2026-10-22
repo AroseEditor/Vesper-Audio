@@ -1,4 +1,4 @@
-const MIN_HOPS = 2
+const MIN_HOPS = 1
 const MAX_HOPS = 9
 const RING_HOPS = 40
 const POOL_MAX = 24
