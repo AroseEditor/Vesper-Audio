@@ -22,6 +22,17 @@ if (testMode && process.env.VESPER_USER_DATA) app.setPath('userData', process.en
 if (!app.requestSingleInstanceLock() && !testMode) app.quit()
 const early = store.load()
 if (early.ai && early.aiPreset === 'heavy') app.commandLine.appendSwitch('force_high_performance_gpu')
+app.commandLine.appendSwitch('disable-renderer-backgrounding')
+app.commandLine.appendSwitch('disable-background-timer-throttling')
+app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
+
+function raisePriority() {
+  for (const m of app.getAppMetrics()) {
+    try {
+      os.setPriority(m.pid, os.constants.priority.PRIORITY_HIGH)
+    } catch {}
+  }
+}
 
 let win = null
 let tray = null
@@ -205,4 +216,6 @@ app.whenReady().then(() => {
   applyLogin()
   createWindow()
   createTray()
+  raisePriority()
+  setInterval(raisePriority, 5000).unref()
 })
