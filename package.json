@@ -1,7 +1,7 @@
 {
   "name": "vesper-audio",
   "productName": "Vesper Audio",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Virtual microphone, local AI noise cancellation and soundboard for Windows",
   "main": "src/main.js",
   "author": "Ayush.ue5",
@@ -32,7 +32,14 @@
     "files": [
       "src/**/*",
       "package.json",
-      "!src/ui/vendor/ort-wasm-simd-threaded.jsep.*"
+      "!src/ui/vendor/ort-wasm-simd-threaded.jsep.*",
+      "!src/ui/gate.js",
+      "!src/ui/voice.js",
+      "!src/ui/vad.js",
+      "!src/ui/vad.worker.js",
+      "!src/ui/speaker.worker.js",
+      "!src/ui/tap.worklet.js",
+      "!src/ui/assets/silero_vad.onnx"
     ],
     "extraResources": [
       {
