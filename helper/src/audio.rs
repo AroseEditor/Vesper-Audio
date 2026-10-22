@@ -109,10 +109,10 @@ fn format_of(store: &IPropertyStore) -> Value {
 
 fn cable_kind(name: &str) -> &'static str {
     let lower = name.to_lowercase();
-    if lower.contains("vesper audio cable") {
-        "vesper"
-    } else if lower.starts_with("cable input") || lower.starts_with("cable output") || (lower.contains("vb-audio") && lower.contains("cable")) {
+    if lower.starts_with("cable input") || lower.starts_with("cable output") || lower.contains("vb-audio") {
         "vb"
+    } else if lower.contains("vesper audio cable") {
+        "vesper"
     } else {
         ""
     }
@@ -245,17 +245,26 @@ fn policy_text(id: &str, key: &PROPERTYKEY, value: &str) -> Result<(), String> {
 }
 
 pub fn rename(id: &str, name: &str, adapter: &str, icon: &str) -> Result<Value, String> {
-    policy_text(id, &KEY_DEVICE_DESC, name)?;
-    if !adapter.is_empty() {
-        policy_text(id, &KEY_ADAPTER_NAME, adapter)?;
-        let _ = policy_text(id, &KEY_FRIENDLY_NAME, &format!("{name} ({adapter})"));
+    let mut done = 0;
+    let mut last = String::new();
+    let mut note = |r: Result<(), String>| match r {
+        Ok(()) => done += 1,
+        Err(e) => last = e,
+    };
+    note(policy_text(id, &KEY_DEVICE_DESC, name));
+    if adapter.is_empty() {
+        note(policy_text(id, &KEY_FRIENDLY_NAME, name));
     } else {
-        let _ = policy_text(id, &KEY_FRIENDLY_NAME, name);
+        note(policy_text(id, &KEY_ADAPTER_NAME, adapter));
+        note(policy_text(id, &KEY_FRIENDLY_NAME, &format!("{name} ({adapter})")));
     }
     if !icon.is_empty() {
-        policy_text(id, &KEY_ICON_PATH, icon)?;
+        note(policy_text(id, &KEY_ICON_PATH, icon));
     }
-    Ok(json!({ "ok": true }))
+    if done == 0 {
+        return Err(last);
+    }
+    Ok(json!({ "ok": true, "applied": done }))
 }
 
 pub fn brand(icon: &str) -> Result<Value, String> {
@@ -269,8 +278,9 @@ pub fn brand(icon: &str) -> Result<Value, String> {
             let Ok(store) = (unsafe { d.OpenPropertyStore(STGM_READ) }) else { continue };
             let name = prop_string(&store, &PKEY_Device_FriendlyName).unwrap_or_default();
             if cable_kind(&name) == "vb" {
-                rename(&device_id(&d), "Vesper Audio Cable", "Vesper Audio", icon)?;
-                renamed += 1;
+                if rename(&device_id(&d), "Vesper Audio Cable", "Vesper Audio", icon).is_ok() {
+                    renamed += 1;
+                }
             }
         }
     }
