@@ -160,7 +160,9 @@ jobs:
           name: app
           path: |
             dist/Vesper-Audio-Setup-*.exe
+            dist/Vesper-Audio-Setup-*.exe.blockmap
             dist/Vesper-Audio-*-portable.exe
+            dist/latest.yml
 
   publish:
     needs: [driver, app]
@@ -183,7 +185,9 @@ jobs:
           fail_on_unmatched_files: true
           files: |
             assets/Vesper-Audio-Setup-*.exe
+            assets/Vesper-Audio-Setup-*.exe.blockmap
             assets/Vesper-Audio-*-portable.exe
+            assets/latest.yml
             assets/VesperAudioCable-x64.zip
             assets/VesperAudioCable-x64.zip.sha256
             assets/VesperAudioCable.cer

@@ -12,6 +12,8 @@ const invokes = new Set([
   'driver:status',
   'driver:install',
   'driver:brand',
+  'update:status',
+  'update:act',
   'driver:uninstall',
   'sounds:add',
   'sounds:remove',
@@ -28,7 +30,7 @@ const invokes = new Set([
   'app:log'
 ])
 
-const events = new Set(['driver:progress', 'model:progress', 'app:shown'])
+const events = new Set(['driver:progress', 'model:progress', 'app:shown', 'update:status', 'app:wake'])
 
 contextBridge.exposeInMainWorld('vesper', {
   invoke: (channel, ...args) =>

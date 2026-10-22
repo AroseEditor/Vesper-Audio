@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, session, shell, dialog, protocol, net } = require('electron')
+const { app, BrowserWindow, Tray, Menu, ipcMain, nativeImage, session, shell, dialog, protocol, net, powerMonitor, powerSaveBlocker } = require('electron')
 const path = require('path')
 const os = require('os')
 const { execFile } = require('child_process')
@@ -9,6 +9,7 @@ const store = require('./store')
 const winaudio = require('./winaudio')
 const driver = require('./driver')
 const models = require('./models')
+const updater = require('./updater')
 
 const REPO_URL = 'https://github.com/AroseEditor/Vesper-Audio'
 const MAX_SOUNDS = 40
@@ -25,6 +26,7 @@ if (early.ai && early.aiPreset === 'heavy') app.commandLine.appendSwitch('force_
 app.commandLine.appendSwitch('disable-renderer-backgrounding')
 app.commandLine.appendSwitch('disable-background-timer-throttling')
 app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
+app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion')
 
 function raisePriority() {
   for (const m of app.getAppMetrics()) {
@@ -133,6 +135,8 @@ function handleIpc() {
   ipcMain.handle('driver:status', () => driver.status())
   ipcMain.handle('driver:install', (_, kind) => driver[kind === 'own' ? 'install' : 'installCable'](p => win && win.webContents.send('driver:progress', p)))
   ipcMain.handle('driver:brand', () => driver.brand())
+  ipcMain.handle('update:status', () => updater.get())
+  ipcMain.handle('update:act', () => updater.act())
   ipcMain.handle('driver:uninstall', () => driver.uninstall())
   ipcMain.handle('model:ensure', (_, name) => models.ensure(name, p => win && win.webContents.send('model:progress', p)))
   ipcMain.handle('sounds:add', async () => {
@@ -217,5 +221,10 @@ app.whenReady().then(() => {
   createWindow()
   createTray()
   raisePriority()
+  powerSaveBlocker.start('prevent-app-suspension')
+  const wake = () => setTimeout(() => win && !win.isDestroyed() && win.webContents.send('app:wake'), 1500)
+  powerMonitor.on('resume', wake)
+  powerMonitor.on('unlock-screen', wake)
+  if (!testMode) updater.start(s => win && !win.isDestroyed() && win.webContents.send('update:status', s))
   setInterval(raisePriority, 5000).unref()
 })

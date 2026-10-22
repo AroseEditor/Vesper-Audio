@@ -1,5 +1,5 @@
 import { RnnoiseWorkletNode, loadRnnoise } from './vendor/noise.js'
-import { VoiceGate } from './voice.js'
+import { VoiceGate, loadVad } from './voice.js'
 
 const SPEEX_ID = '@sapphi-red/web-noise-suppressor/speex'
 const HOP = 480
@@ -7,6 +7,11 @@ const PREBUFFER_HOPS = 3
 const DFN3_MODEL_DELAY = 0.032
 const DPDFNET_MODEL_DELAY = 0.062
 const RELEASE_MS = 90
+const HEALTH_MS = 2000
+const STALL_CHECKS = 3
+const FROZEN_CHECKS = 15
+const FROZEN_COOLDOWN_MS = 120000
+const DITHER = 3e-6
 const MAX_ATTENUATION_DB = 45
 const WATCH_MS = 2000
 const WATCH_WARMUP_S = 8
@@ -61,6 +66,14 @@ export class Engine {
     this.stats = { underruns: 0, queued: 0, backlog: 0, target: PREBUFFER_HOPS * HOP, rebuffers: 0, drops: 0 }
     this.forceLight = false
     this.watch = null
+    this.health = null
+    this.recovering = false
+    this.stall = 0
+    this.lastUnderruns = 0
+    this.frozen = 0
+    this.lastFrozenFix = 0
+    this.deviceTimer = null
+    if (navigator.mediaDevices) navigator.mediaDevices.addEventListener('devicechange', () => this.deviceChanged())
     this.state = { running: false, hasCable: false, error: '', warning: '', denoiser: '' }
   }
 
@@ -131,6 +144,8 @@ export class Engine {
     this.sbBus = ctx.createGain()
     this.analyser = ctx.createAnalyser()
     this.analyser.fftSize = 1024
+    this.fxAnalyser = ctx.createAnalyser()
+    this.fxAnalyser.fftSize = 1024
     this.outAnalyser = ctx.createAnalyser()
     this.outAnalyser.fftSize = 1024
     this.sink = ctx.createMediaStreamDestination()
@@ -140,6 +155,7 @@ export class Engine {
     this.gain.connect(this.fxIn)
     this.gain.connect(this.analyser)
     this.fxOut.connect(this.gate)
+    this.fxOut.connect(this.fxAnalyser)
     this.gate.connect(this.limiter)
     this.limiter.connect(this.micOut)
     this.micOut.connect(this.bus)
@@ -160,8 +176,85 @@ export class Engine {
     this.sbEl = new Audio()
     this.sbEl.srcObject = this.sbDest.stream
     this.mode = ''
+    const dither = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate)
+    const noise = dither.getChannelData(0)
+    for (let i = 0; i < noise.length; i++) noise[i] = (Math.random() - 0.5) * 2 * DITHER
+    this.dither = ctx.createBufferSource()
+    this.dither.buffer = dither
+    this.dither.loop = true
+    this.dither.connect(this.fxIn)
+    this.dither.start()
+    ctx.onstatechange = () => {
+      if (ctx.state === 'suspended' || ctx.state === 'interrupted') ctx.resume().catch(() => {})
+    }
+    for (const track of stream.getAudioTracks()) track.addEventListener('ended', () => this.recover('The microphone stopped, so Vesper Audio reconnected it.'))
     this.state.running = true
     if (ctx.state === 'suspended') await ctx.resume()
+    this.startHealth()
+  }
+
+  rms(node) {
+    if (!node) return 0
+    const buf = new Float32Array(node.fftSize)
+    node.getFloatTimeDomainData(buf)
+    let sum = 0
+    for (const v of buf) sum += v * v
+    return Math.sqrt(sum / buf.length)
+  }
+
+  startHealth() {
+    this.stopHealth()
+    this.stall = 0
+    this.lastUnderruns = this.stats.underruns
+    this.health = setInterval(() => this.checkHealth(), HEALTH_MS)
+  }
+
+  stopHealth() {
+    if (this.health) clearInterval(this.health)
+    this.health = null
+  }
+
+  checkHealth() {
+    const ctx = this.ctx
+    if (!ctx || this.recovering) return
+    if (ctx.state === 'suspended' || ctx.state === 'interrupted') ctx.resume().catch(() => {})
+    const track = this.stream && this.stream.getAudioTracks()[0]
+    if (!track || track.readyState === 'ended') return this.recover('The microphone stopped, so Vesper Audio reconnected it.')
+    const input = this.rms(this.analyser)
+    this.frozen = input === 0 || track.muted ? this.frozen + 1 : 0
+    if (this.frozen >= FROZEN_CHECKS && Date.now() - this.lastFrozenFix > FROZEN_COOLDOWN_MS) {
+      this.frozen = 0
+      this.lastFrozenFix = Date.now()
+      return this.recover('The microphone went silent, so Vesper Audio reconnected it.')
+    }
+    if (this.active !== 'custom' && this.active !== 'heavy' && this.active !== 'clearcast') return
+    const lost = this.stats.underruns - this.lastUnderruns
+    this.lastUnderruns = this.stats.underruns
+    this.stall = lost >= ctx.sampleRate * (HEALTH_MS / 1000) * 0.8 ? this.stall + 1 : 0
+    if (this.stall >= STALL_CHECKS) this.recover('Noise cancellation stalled, so Vesper Audio restarted it.', true)
+  }
+
+  recover(reason, fxOnly = false) {
+    if (!this.cfg || this.recovering) return Promise.resolve()
+    this.recovering = true
+    this.stall = 0
+    if (fxOnly) this.mode = ''
+    else this.structKey = ''
+    return this.apply(this.cfg).finally(() => {
+      this.recovering = false
+      if (reason) this.state.warning = reason
+    })
+  }
+
+  deviceChanged() {
+    clearTimeout(this.deviceTimer)
+    this.deviceTimer = setTimeout(async () => {
+      if (!this.ctx || !this.cfg || this.recovering) return
+      const want = await resolveDevice('audioinput', this.cfg.inputName).catch(() => '')
+      const track = this.stream && this.stream.getAudioTracks()[0]
+      const have = track && track.getSettings().deviceId
+      if (want && have && want !== have) this.recover('Audio devices changed, so Vesper Audio reconnected.')
+    }, 1500)
   }
 
   async wasmBinary(name) {
@@ -198,8 +291,17 @@ export class Engine {
     const wantVoice = gated && cfg.voiceprint && cfg.speaker
     if (wantVoice && (!this.voice || this.voice.printId !== cfg.voiceprint.id || this.voice.speaker !== cfg.speaker || this.voice.sensitivity !== cfg.voiceSensitivity)) {
       if (this.voice) this.voice.stop()
-      this.voice = new VoiceGate(ctx, this.fxOut, this.gate, cfg.voiceprint, cfg.speaker, s => this.onVoiceState(s), cfg.voiceSensitivity)
-      await this.voice.start()
+      this.voice = null
+      try {
+        const vad = await loadVad()
+        this.voice = new VoiceGate(ctx, this.fxOut, this.gate, cfg.voiceprint, cfg.speaker, vad, s => this.onVoiceState(s), cfg.voiceSensitivity)
+        await this.voice.start()
+      } catch (err) {
+        if (this.voice) this.voice.stop()
+        this.voice = null
+        this.gate.gain.setTargetAtTime(1, ctx.currentTime, 0.02)
+        this.state.warning = 'Voice lock could not start (' + String((err && err.message) || err) + ').'
+      }
     } else if (!wantVoice && this.voice) {
       this.voice.stop()
       this.voice = null
@@ -216,6 +318,7 @@ export class Engine {
       channelCountMode: 'explicit',
       processorOptions: { hop: HOP, prebuffer: PREBUFFER_HOPS }
     })
+    node.onprocessorerror = () => this.recover('The noise cancelling engine crashed, so Vesper Audio restarted it.', true)
     node.port.postMessage({ type: 'link', port: channel.port1 }, [channel.port1])
     node.port.onmessage = e => {
       if (node.dead) return
@@ -246,6 +349,8 @@ export class Engine {
       node.disconnect()
       throw err
     }
+    worker.onerror = () => this.recover('The noise cancelling engine crashed, so Vesper Audio restarted it.', true)
+    worker.onmessageerror = worker.onerror
     this.disposers.push(() => worker.terminate())
     return node
   }
@@ -263,6 +368,7 @@ export class Engine {
       add(pass)
     } else if (mode === 'rnnoise') {
       const node = new RnnoiseWorkletNode(ctx, { maxChannels: 1, wasmBinary: await this.wasmBinary('rnnoise') })
+      node.onprocessorerror = () => this.recover('The noise cancelling engine crashed, so Vesper Audio restarted it.', true)
       this.fxIn.connect(node).connect(this.fxOut)
       add(node)
       this.fxNodes = { rnnoise: node }
@@ -272,6 +378,7 @@ export class Engine {
         channelCountMode: 'explicit',
         processorOptions: { maxChannels: 1, wasmBinary: await this.wasmBinary('speex'), noiseSuppress: Math.round(cfg.speexDb) }
       })
+      node.onprocessorerror = () => this.recover('The noise cancelling engine crashed, so Vesper Audio restarted it.', true)
       this.fxIn.connect(node).connect(this.fxOut)
       add(node)
       this.fxNodes = { speex: node }
@@ -437,6 +544,7 @@ export class Engine {
   }
 
   async teardown() {
+    this.stopHealth()
     if (this.voice) this.voice.stop()
     this.voice = null
     if (this.ctx) {
@@ -459,7 +567,9 @@ export class Engine {
     this.ctx = null
     this.stream = null
     this.analyser = null
+    this.fxAnalyser = null
     this.outAnalyser = null
+    this.dither = null
     this.mode = ''
     this.structKey = ''
     this.buffers.clear()

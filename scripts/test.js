@@ -121,6 +121,14 @@ async function main() {
   })
   check('closing hides to tray', hidden)
   check('engine survives hidden window', await page.evaluate(() => window.__vesper.engine.state.running))
+  const vad = await page.evaluate(async () => {
+    const v = await window.__vesper.loadVad()
+    const burst = new Float32Array(16000 * 2).map((_, i) => (Math.random() - 0.5) * 0.4 * Math.sin((i / 16000) * Math.PI))
+    const probs = await v.push(burst)
+    v.dispose()
+    return { frames: probs.length, peak: Math.max(...probs) }
+  })
+  check('speech detector loads and ignores a noise burst', vad.frames >= 60 && vad.peak < 0.5, JSON.stringify(vad))
   check('no page errors', errors.length === 0, errors.join(' | '))
   await page.evaluate(() => window.__vesper.save({ closeToTray: false }))
   await new Promise(res => setTimeout(res, 400))

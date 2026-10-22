@@ -1,6 +1,6 @@
 import { hydrate, icon } from './icons.js'
 import { Engine } from './engine.js'
-import { Enroller, loadSpeaker, buildPrint, pcmToBytes, bytesToPcm, MIN_SPEECH_SECONDS } from './voice.js'
+import { Enroller, loadSpeaker, loadVad, buildPrint, pcmToBytes, bytesToPcm, MIN_SPEECH_SECONDS } from './voice.js'
 
 const api = window.vesper
 const $ = id => document.getElementById(id)
@@ -17,8 +17,12 @@ const PARAGRAPHS = {
   }
 }
 const PRESET_LABEL = { custom: 'Custom', heavy: 'Custom Heavy', clearcast: 'ClearCast' }
-const SPEECH_TARGET = 30
-const LAUGH_TARGET = 4
+const ENROLL_STEPS = [
+  { id: 'en', lang: 'en', title: 'read in English', seconds: 12, text: PARAGRAPHS.en.text },
+  { id: 'hi', lang: 'hi', title: 'read in Hindi', seconds: 12, text: PARAGRAPHS.hi.text },
+  { id: 'free', lang: 'en', title: 'talk freely', seconds: 10, text: 'Tell Vesper about your day in whichever language you normally speak. Mix Hindi and English if that is how you talk.' },
+  { id: 'laugh', lang: 'en', title: 'laugh', seconds: 3, text: 'Now laugh out loud for a few seconds.' }
+]
 const NVIDIA = 0x10de
 const MIN_VRAM_MB = 2048
 
@@ -308,8 +312,9 @@ function renderDevices() {
 
 function voiceSummary() {
   const samples = state.settings.voiceSamples
-  if (!samples.length) return 'No voice recorded yet. Record the paragraph once to enable Custom.'
-  const langs = [...new Set(samples.map(x => (PARAGRAPHS[x.language] ? PARAGRAPHS[x.language].label : x.language)))]
+  if (!samples.length) return 'No voice recorded yet. Record your voice once to enable Custom.'
+  const label = x => (x.language === 'en+hi' ? 'English and Hindi' : PARAGRAPHS[x.language] ? PARAGRAPHS[x.language].label : x.language)
+  const langs = [...new Set(samples.map(label))]
   const seconds = Math.round(samples.reduce((n, x) => n + x.seconds, 0))
   return `Your voice is saved (${langs.join(' and ')}, ${seconds} s). Custom is best and needs no slider.`
 }
@@ -444,14 +449,34 @@ function renderBoard() {
 }
 
 const SENSITIVITY = {
-  relaxed: { label: 'Relaxed', small: 'Lets your voice through easily, even when you sound different. Other voices may leak in more.' },
-  balanced: { label: 'Balanced', small: 'Recommended. Keeps your voice open and blocks other people.' },
-  strict: { label: 'Strict', small: 'Blocks other voices hardest. Your voice may drop out when you sound unusual.' }
+  relaxed: { label: 'Relaxed', small: 'Adds 0.5 s of delay. Never cuts you, but other voices leak in more.' },
+  balanced: { label: 'Balanced', small: 'Recommended. Adds 0.8 s of delay. Keeps your voice and blocks other people and breaths.' },
+  strict: { label: 'Strict', small: 'Adds 1.0 s of delay. Blocks other voices hardest, best for streaming and recording.' }
+}
+
+function renderUpdate() {
+  const u = state.update || { state: 'idle' }
+  const rows = {
+    checking: ['Checking for updates', 'Checking', true],
+    downloading: [`Downloading version ${u.version} (${u.percent || 0}%)`, 'Downloading', true],
+    ready: [`Version ${u.version} is ready to install`, 'Restart to update', false],
+    available: [`Version ${u.version} is available`, 'Download', false],
+    current: ['Vesper Audio is up to date', 'Check again', false],
+    error: ['Update check failed: ' + (u.message || 'unknown error'), 'Try again', false]
+  }
+  const [text, label, busy] = rows[u.state] || [u.message || 'Updates', 'Check for updates', false]
+  $('update-text').textContent = text
+  const button = $('set-update')
+  button.textContent = label
+  button.disabled = busy
+  const offer = u.state === 'ready' || u.state === 'available'
+  notice('update', offer ? { text, label, action: () => api.invoke('update:act') } : null)
 }
 
 function renderSettings() {
   $('set-autostart').checked = state.settings.autoStart
   $('set-tray').checked = state.settings.closeToTray
+  renderUpdate()
   $('version').textContent = 'Vesper Audio ' + state.info.version + (vacOut() && vacIn() ? '  |  Vesper Audio Cable ready' : '')
   const level = SENSITIVITY[state.settings.voiceSensitivity] ? state.settings.voiceSensitivity : 'balanced'
   $('sens-text').textContent = SENSITIVITY[level].label
@@ -630,37 +655,22 @@ async function enroll() {
     return false
   }
   return new Promise(resolve => {
-    const total = SPEECH_TARGET + LAUGH_TARGET
-    const hasSaved = state.settings.voiceSamples.length > 0
-    let language = navigator.language && navigator.language.toLowerCase().startsWith('hi') ? 'hi' : 'en'
+    const total = ENROLL_STEPS.reduce((n, x) => n + x.seconds, 0)
     let enroller = null
     let spoken = 0
-    const status = h('p', { class: 'muted', text: 'Pick a language, press Start, then read the whole paragraph at your normal speaking volume.' })
+    let step = 0
+    let base = 0
+    let stepStart = 0
+    const status = h('p', { class: 'muted', text: 'Press Start, then follow the steps in your normal voice. Accent, speed and mixing Hindi with English are all fine.' })
+    const heading = h('h3', { class: 'step-title', text: '' })
     const paragraph = h('div', { class: 'paragraph' })
     const progress = h('i')
     const clock = h('span', { class: 'muted', text: '0 s' })
-    const add = h('input', { type: 'checkbox', id: 'enroll-add' })
-    const tabs = h('div', { class: 'tabs', role: 'tablist' })
     const words = () => [...paragraph.children]
-    const drawParagraph = () => {
-      paragraph.replaceChildren(...PARAGRAPHS[language].text.split(' ').map(w => h('span', { text: w + ' ', lang: language })))
-      for (const t of tabs.children) t.classList.toggle('active', t.dataset.lang === language)
-    }
-    for (const [key, p] of Object.entries(PARAGRAPHS)) {
-      tabs.append(
-        h('button', {
-          class: 'tab',
-          type: 'button',
-          role: 'tab',
-          'data-lang': key,
-          text: p.label,
-          onclick: () => {
-            if (enroller) return
-            language = key
-            drawParagraph()
-          }
-        })
-      )
+    const drawStep = () => {
+      const s = ENROLL_STEPS[step]
+      heading.textContent = `Step ${step + 1} of ${ENROLL_STEPS.length}: ${s.title}`
+      paragraph.replaceChildren(...s.text.split(' ').map(w => h('span', { text: w + ' ', lang: s.lang })))
     }
     const close = ok => {
       if (enroller) enroller.stop()
@@ -670,40 +680,59 @@ async function enroll() {
       sync()
     }
     let finishNow = null
-    const begin = () => {
-      enroller = new Enroller(engine.ctx, engine.fxOut, update)
-      status.textContent = 'Listening. Read the whole paragraph, then laugh when asked. You can press Stop once you have spoken for ' + MIN_SPEECH_SECONDS + ' seconds.'
+    const next = () => {
+      base += ENROLL_STEPS[step].seconds
+      if (step >= ENROLL_STEPS.length - 1) return finishNow()
+      step++
+      stepStart = spoken
+      if (enroller) enroller.mode = ENROLL_STEPS[step].id === 'laugh' ? 'laugh' : 'speech'
+      drawStep()
+    }
+    const begin = async () => {
+      try {
+        enroller = new Enroller(engine.ctx, engine.fxOut, update, await loadVad())
+      } catch (err) {
+        status.className = 'error'
+        status.textContent = reason(err)
+        return
+      }
+      status.textContent = 'Listening. Follow the steps, you can press Stop once you have spoken for ' + MIN_SPEECH_SECONDS + ' seconds.'
       buttons('recording')
     }
     const buttons = mode => {
       const list = [h('button', { class: 'btn', type: 'button', text: 'Cancel', onclick: () => close(false) })]
       if (mode === 'ready') list.push(h('button', { class: 'btn primary', type: 'button', text: 'Start', onclick: begin }))
-      if (mode === 'recording') list.push(h('button', { class: 'btn primary', type: 'button', id: 'enroll-stop', text: `Stop (needs ${MIN_SPEECH_SECONDS} s)`, disabled: true, onclick: () => finishNow() }))
+      if (mode === 'recording') {
+        list.push(h('button', { class: 'btn', type: 'button', id: 'enroll-skip', text: 'Skip step', onclick: next }))
+        list.push(h('button', { class: 'btn primary', type: 'button', id: 'enroll-stop', text: `Stop (needs ${MIN_SPEECH_SECONDS} s)`, disabled: true, onclick: () => finishNow() }))
+      }
       $('dlg-actions').replaceChildren(...list)
     }
     const update = seconds => {
       spoken = seconds
-      progress.style.width = Math.min(100, (seconds / total) * 100) + '%'
+      const s = ENROLL_STEPS[step]
+      const inStep = Math.min(seconds - stepStart, s.seconds)
+      progress.style.width = Math.min(100, ((base + inStep) / total) * 100) + '%'
       clock.textContent = Math.round(seconds) + ' s'
-      const read = Math.floor((Math.min(seconds, SPEECH_TARGET) / SPEECH_TARGET) * words().length)
+      const read = s.id === 'free' || s.id === 'laugh' ? 0 : Math.floor((inStep / s.seconds) * words().length)
       words().forEach((w, i) => w.classList.toggle('done', i < read))
       const stop = $('enroll-stop')
       if (stop && seconds >= MIN_SPEECH_SECONDS) {
         stop.disabled = false
         stop.textContent = 'Stop'
       }
-      if (seconds >= SPEECH_TARGET && seconds < total) status.textContent = 'Now laugh out loud for a few seconds.'
-      if (seconds >= total) finishNow()
+      if (seconds - stepStart >= s.seconds) next()
     }
     finishNow = async () => {
       if (!enroller) return
-      const audio = enroller.stop()
+      const taking = enroller
       enroller = null
+      const audio = await taking.stop()
       status.className = 'muted'
       status.textContent = 'Learning your voice'
       $('dlg-actions').replaceChildren()
       try {
-        state.settings.voiceSamples = await api.invoke('voice:save', pcmToBytes(audio), { replace: !(hasSaved && add.checked), language, seconds: spoken })
+        state.settings.voiceSamples = await api.invoke('voice:save', pcmToBytes(audio), { replace: true, language: 'en+hi', seconds: spoken })
         state.settings.voiceprints = {}
         await rebuildPrint(tierOf(), p => (status.textContent = 'Learning your voice ' + Math.round(p * 100) + '%'))
         await save({ ai: true, aiPreset: state.settings.aiPreset === 'clearcast' ? 'custom' : state.settings.aiPreset, basic: false })
@@ -719,7 +748,10 @@ async function enroll() {
             type: 'button',
             text: 'Try again',
             onclick: () => {
-              drawParagraph()
+              step = 0
+              base = 0
+              stepStart = 0
+              drawStep()
               update(0)
               status.className = 'muted'
               status.textContent = 'Press Start when you are ready.'
@@ -732,16 +764,16 @@ async function enroll() {
     dialog({
       title: 'Teach Vesper your voice',
       body: [
-        tabs,
         status,
+        heading,
         paragraph,
         h('div', { class: 'progress' }, progress),
-        h('div', { class: 'row' }, clock, hasSaved ? h('label', { class: 'inline-check' }, add, h('span', { text: 'Add to my saved voice instead of replacing it' })) : h('span')),
+        h('div', { class: 'row' }, clock),
         h('p', { class: 'hint', text: 'Your recording stays on this PC. It is only used to recognise your voice.' })
       ],
       actions: []
     })
-    drawParagraph()
+    drawStep()
     buttons('ready')
   })
 }
@@ -1125,6 +1157,7 @@ function bindControls() {
   $('set-tray').addEventListener('change', e => save({ closeToTray: e.target.checked }))
   $('set-driver').addEventListener('click', () => installDriver())
   $('set-own').addEventListener('click', () => installOwnDriver())
+  $('set-update').addEventListener('click', () => api.invoke('update:act'))
   $('set-uninstall').addEventListener('click', () => uninstallDriver())
   $('set-voice').addEventListener('click', async () => {
     const ok = await enroll()
@@ -1153,7 +1186,13 @@ async function boot() {
   bindControls()
   engine.onSoundEnd = () => renderBoard()
   engine.onVoiceState = s => (state.voice = s)
-  if (state.info.testMode) window.__vesper = { engine, state, api, enroll, installDriver, installOwnDriver, uninstallDriver, save, sync, refreshDevices, config: engineConfig, ensureSpeaker, rebuildPrint, tierOf }
+  api.on('app:wake', () => engine.recover('Windows woke up, so Vesper Audio restarted the audio.'))
+  state.update = await api.invoke('update:status').catch(() => null)
+  api.on('update:status', s => {
+    state.update = s
+    renderUpdate()
+  })
+  if (state.info.testMode) window.__vesper = { engine, state, api, enroll, loadVad, installDriver, installOwnDriver, uninstallDriver, save, sync, refreshDevices, config: engineConfig, ensureSpeaker, rebuildPrint, tierOf }
   await refreshDevices()
   state.driver = await api.invoke('driver:status').catch(() => null)
   renderAll()
