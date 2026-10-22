@@ -140,10 +140,23 @@ Fallback: if the main model is not downloaded yet, or the CPU cannot keep up for
 
 ### How the voice lock works
 
-1. **Enrollment.** You read a paragraph (English or Hindi) and laugh. Speech frames are collected from the denoised signal. Press **Stop** after 10 seconds of speech, or let it finish at 34 seconds.
-2. **Voiceprint.** 1.6 second windows go through a speaker verification network (80-dim Kaldi fbank, then a 512 or 256 dim embedding). The centroid is stored. The match threshold comes from held-out windows: centroid from half of your windows, score the other half, `thr = mean - 2.5 sd`, capped at 0.42 (small) or 0.40 (heavy). Cutting your own voice is worse than a brief leak, so the cap is conservative.
-3. **Live gate.** A voice activity detector flags speech. On a new utterance the gate opens optimistically for a short grace window, then similarity decides. Decisions use the last 1.0 to 1.6 seconds. Gate gain is smoothed (10 ms attack, 50 ms release).
-4. **Heavy** waits for a full 1.6 second window before deciding, which is slower to react but steadier.
+1. **Enrollment.** Read the paragraph (English or Hindi) in your normal voice and laugh. Accent and speed do not matter, the app learns how you really sound. Press **Stop** after 10 seconds of speech, or let it finish at 34 seconds.
+2. **Voiceprint.** 1.6 second windows every 0.4 seconds go through a speaker verification network (80-dim Kaldi fbank, then a 256 or 512 dim embedding). The windows are clustered with k-means into up to 6 centroids, so quiet, loud, fast and relaxed speech each get their own. The match threshold comes from held-out windows: centroids from half of your recording, score the other half, `thr = mean - 2 sd`, floor 0.30, cap 0.40 (Custom) or 0.38 (Heavy). Cutting your own voice is worse than a brief leak, so the cap is conservative.
+3. **Live gate.** The gate is open by default and closes only after two consecutive "not you" verdicts (one if the score is far below the reject line). A verdict is the median of the last three scores against your best matching centroid, with separate accept and reject thresholds (`reject = thr - 0.1`) so it does not flutter. Confident matches are kept in a gallery of up to 24 live embeddings, so the voiceprint follows you through the session. Gate gain is smoothed (10 ms attack, 50 ms release).
+4. **Strictness.** **Settings, Voice lock strictness** moves both thresholds: Relaxed (-0.06 / -0.08), Balanced (default), Strict (+0.05 / +0.06).
+5. **Heavy** waits for a full 1.6 second window before deciding, which is slower to react but steadier.
+
+Measured on 8 LibriSpeech dev-clean speakers (about 38 s of enrollment each, 4 test clips each, mixed with 4 other speakers, CAM++ model, 100 ms chunks). "Me open" is the share of speech frames where the gate is open for the enrolled speaker, "others open" the same for everyone else. Speed shifts stand in for sounding different from the enrollment, which is what an accent or a tired voice does.
+
+| Test audio | Old gate, me open | New gate, me open | Old gate, others open | New gate, others open |
+| --- | --- | --- | --- | --- |
+| Same conditions | 97% | **100%** | 13% | 38% |
+| Speed +/-10% | 79% | **99%** | 13% | 40% |
+| Speed +/-20% | 34% | **69%** | 12% | 40% |
+| Room reverb | 96% | **100%** | 13% | 37% |
+| First second of your speech | 80% | **100%** | | |
+
+The trade is deliberate: the old gate cut the user's own voice far too often, the new one almost never does, and in exchange the first second or so of another person's sentence leaks until two verdicts agree (others are open in 99% of their first second). Strict lowers the leak to about 34% and drops "me open" at +/-20% shift to 48%. Small test set on read speech, so read it as direction, not proof.
 
 Your recording is stored locally as 16 kHz PCM under `voice/` so Heavy can build its own voiceprint without asking you to read again.
 
@@ -206,7 +219,7 @@ Streaming frames are latency bound, not throughput bound, so a GPU does not help
 | CAM++ small | 0.55 to 0.68 | 0.28 to 0.42 |
 | ResNet293 | 0.48 to 0.66 | 0.19 to 0.32 |
 
-Small test set, so read it as direction, not proof. In the live gate run on a mixed file of three speakers, Custom passes my voice 80 to 100 percent in the first 1.2 s and about 90 percent after, while other speakers are open 0 to 8 percent after their first second.
+Small test set, so read it as direction, not proof. The live gate results are in [How the voice lock works](#how-the-voice-lock-works).
 
 ### Latency
 
