@@ -1,10 +1,12 @@
+import { GateLogic } from './gate.js'
+
 export const RATE = 16000
 const WIN = 400
 const SHIFT = 160
 const NFFT = 512
 const HALF = NFFT / 2
 const MELS = 80
-const VAD_RMS = 0.006
+const VAD_RMS = 0.0035
 const WINDOW_SECONDS = 1.6
 const CHUNK_SECONDS = 0.1
 export const MIN_SPEECH_SECONDS = 10
@@ -220,40 +222,81 @@ function meanUnit(list) {
   return unit(mean)
 }
 
-export async function buildPrint(speaker, segments, onProgress = () => {}, cap = 0.42) {
+function bestSim(embedding, centers) {
+  let best = -1
+  for (const c of centers) best = Math.max(best, cosine(embedding, c))
+  return best
+}
+
+function kmeans(vectors, k) {
+  if (vectors.length <= k) return vectors.slice()
+  let centers = [vectors[0]]
+  while (centers.length < k) {
+    let far = vectors[0]
+    let farSim = 2
+    for (const v of vectors) {
+      const sim = bestSim(v, centers)
+      if (sim < farSim) {
+        farSim = sim
+        far = v
+      }
+    }
+    centers.push(far)
+  }
+  for (let round = 0; round < 12; round++) {
+    const groups = centers.map(() => [])
+    for (const v of vectors) {
+      let at = 0
+      let top = -2
+      centers.forEach((c, i) => {
+        const sim = cosine(v, c)
+        if (sim > top) {
+          top = sim
+          at = i
+        }
+      })
+      groups[at].push(v)
+    }
+    centers = groups.map((g, i) => (g.length ? meanUnit(g) : centers[i]))
+  }
+  return centers
+}
+
+const clusterCount = n => Math.min(6, Math.max(1, Math.round(n / 10)))
+
+export async function buildPrint(speaker, segments, onProgress = () => {}, cap = 0.4) {
   const win = Math.round(WINDOW_SECONDS * RATE)
-  const hop = Math.round(win / 2)
-  const centroids = []
-  const heldOut = []
+  const hop = Math.round(0.4 * RATE)
+  const windows = []
   let total = 0
   for (const audio of segments) total += Math.max(0, Math.floor((audio.length - win) / hop) + 1)
   let done = 0
   for (const audio of segments) {
-    const embeddings = []
     for (let at = 0; at + win <= audio.length; at += hop) {
       const part = audio.subarray(at, at + win)
-      if (rms(part) > VAD_RMS) embeddings.push(await speaker.embed(part))
+      if (rms(part) > VAD_RMS) windows.push({ e: await speaker.embed(part), block: Math.floor(at / (3 * RATE)) })
       onProgress(++done / Math.max(1, total))
     }
-    if (embeddings.length < 4) continue
-    centroids.push(meanUnit(embeddings))
-    const even = embeddings.filter((_, i) => i % 2 === 0)
-    const odd = embeddings.filter((_, i) => i % 2 === 1)
-    const evenCentroid = meanUnit(even)
-    const oddCentroid = meanUnit(odd)
-    for (const e of odd) heldOut.push(cosine(e, evenCentroid))
-    for (const e of even) heldOut.push(cosine(e, oddCentroid))
   }
-  if (!centroids.length) throw new Error('Not enough speech was captured. Please read the paragraph again.')
+  if (windows.length < 8) throw new Error('Not enough speech was captured. Please read the paragraph again.')
+  const first = windows.filter(w => w.block % 2 === 0)
+  const second = windows.filter(w => w.block % 2 === 1)
+  const sets = first.length >= 4 && second.length >= 4 ? [first, second] : [windows.filter((_, i) => i % 2 === 0), windows.filter((_, i) => i % 2 === 1)]
+  const heldOut = []
+  for (const [train, test] of [sets, [sets[1], sets[0]]]) {
+    const centers = kmeans(train.map(w => w.e), clusterCount(train.length))
+    for (const w of test) heldOut.push(bestSim(w.e, centers))
+  }
   const mu = heldOut.reduce((a, b) => a + b, 0) / heldOut.length
   const sigma = Math.sqrt(heldOut.reduce((a, b) => a + (b - mu) ** 2, 0) / heldOut.length)
+  const centroids = kmeans(windows.map(w => w.e), clusterCount(windows.length))
   return {
     id: crypto.randomUUID(),
     centroids: centroids.map(c => Array.from(c)),
-    thr: Math.min(cap, Math.max(0.3, mu - 2.5 * sigma)),
+    thr: Math.min(cap, Math.max(0.3, mu - 2 * sigma)),
     mu,
     sigma,
-    windows: heldOut.length,
+    windows: windows.length,
     created: Date.now()
   }
 }
@@ -286,91 +329,35 @@ export class Enroller {
 }
 
 export class VoiceGate {
-  constructor(ctx, source, gate, voiceprint, speaker, onState) {
+  constructor(ctx, source, gate, voiceprint, speaker, onState, sensitivity = 'balanced') {
     this.ctx = ctx
     this.source = source
     this.gate = gate
-    this.centroids = voiceprint.centroids.map(c => Float32Array.from(c))
     this.printId = voiceprint.id
-    this.thr = voiceprint.thr
     this.speaker = speaker
-    this.quick = speaker.provider !== 'webgpu'
-    this.onState = onState
-    this.ring = new Float32Array(Math.round(RATE * 3))
-    this.flags = []
-    this.t = 0
-    this.silence = 10
-    this.burstStart = -10
-    this.lastOtherAt = -100
-    this.verdict = 'unknown'
-    this.sim = 0
+    this.sensitivity = sensitivity
+    this.logic = new GateLogic({ centroids: voiceprint.centroids, thr: voiceprint.thr, speaker, sensitivity, onState })
     this.open = false
-    this.busy = false
-    this.tick = 0
   }
 
   async start() {
     this.gate.gain.value = 0
-    this.tap = createTap(this.ctx, this.source, chunk => this.push(chunk))
+    this.tap = createTap(this.ctx, this.source, chunk => {
+      this.logic.push(chunk)
+      this.apply()
+    })
+  }
+
+  apply() {
+    const open = this.logic.open
+    if (open === this.open) return
+    this.open = open
+    this.gate.gain.setTargetAtTime(open ? 1 : 0, this.ctx.currentTime, open ? 0.01 : 0.05)
   }
 
   stop() {
+    this.logic.stop()
     if (this.tap) this.tap.stop()
     this.tap = null
-  }
-
-  push(chunk) {
-    this.t += CHUNK_SECONDS
-    this.ring.copyWithin(0, chunk.length)
-    this.ring.set(chunk, this.ring.length - chunk.length)
-    const speech = rms(chunk) > VAD_RMS
-    this.flags.push(speech)
-    if (this.flags.length > 16) this.flags.shift()
-    if (speech) {
-      if (this.silence >= 0.4) {
-        this.burstStart = this.t
-        this.verdict = 'unknown'
-      }
-      this.silence = 0
-    } else {
-      this.silence += CHUNK_SECONDS
-    }
-    if (++this.tick % (this.verdict === 'unknown' ? 2 : 4) === 0) this.verify()
-    this.decide()
-  }
-
-  async verify() {
-    if (this.busy || !this.tap) return
-    const speechChunks = this.flags.filter(Boolean).length
-    if (speechChunks < (this.quick ? 5 : 8)) return
-    const short = this.quick && speechChunks < 8
-    const n = Math.round((short ? 1 : WINDOW_SECONDS) * RATE)
-    const thr = short ? this.thr - 0.05 : this.thr
-    this.busy = true
-    try {
-      const emb = await this.speaker.embed(this.ring.subarray(this.ring.length - n))
-      this.sim = Math.max(...this.centroids.map(c => cosine(emb, c)))
-      const was = this.verdict
-      if (this.sim >= thr) this.verdict = 'me'
-      else if (was !== 'me' || this.sim < thr - 0.05) this.verdict = 'other'
-      if (this.verdict === 'other') this.lastOtherAt = this.t
-    } catch {
-    } finally {
-      this.busy = false
-    }
-  }
-
-  decide() {
-    const grace = this.quick && this.t - this.lastOtherAt < 4 ? 0.4 : 0.8
-    let open
-    if (this.silence > 0.4) open = false
-    else if (this.verdict === 'me') open = true
-    else if (this.verdict === 'other') open = false
-    else open = this.t - this.burstStart < grace
-    if (open !== this.open) {
-      this.open = open
-      this.gate.gain.setTargetAtTime(open ? 1 : 0, this.ctx.currentTime, open ? 0.01 : 0.05)
-    }
-    this.onState({ open: this.open, verdict: this.verdict, sim: this.sim })
   }
 }

@@ -26,20 +26,61 @@ const copies = [
 fs.mkdirSync(out, { recursive: true })
 for (const [from, to] of copies) fs.copyFileSync(from, path.join(out, to))
 
-const speexSrc = fs.readFileSync(path.join(ns, 'speex', 'workletProcessor.js'), 'utf8')
-const patches = [
-  [
-    'this.port.addEventListener(`message`,e=>{e.data===`destroy`&&this.destroy()})',
-    'this.port.onmessage=e=>{e.data===`destroy`?this.destroy():typeof e.data==`number`&&(this.ns=e.data,this.processor?.setProperty(`noiseSuppress`,e.data))}'
-  ],
-  [
-    'this.processor=s(t,{bufferSize:128,maxChannels:e.processorOptions.maxChannels,sampleRate}),',
-    'this.processor=s(t,{bufferSize:128,maxChannels:e.processorOptions.maxChannels,sampleRate}),this.processor.setProperty(`noiseSuppress`,this.ns??e.processorOptions.noiseSuppress??-15),'
-  ]
-]
-let patched = speexSrc
-for (const [from, to] of patches) {
-  if (!patched.includes(from)) throw new Error('speex worklet patch target missing: ' + from)
-  patched = patched.replace(from, () => to)
+const obsSpeex = `const FRAME=480,RING=FRAME*16;
+class ObsSpeex extends AudioWorkletProcessor{
+constructor(options){
+super();
+const p=options.processorOptions;
+this.level=typeof p.noiseSuppress==='number'?p.noiseSuppress:-30;
+this.inBuf=new Float32Array(FRAME);
+this.fill=0;
+this.ring=new Float32Array(RING);
+this.rp=0;
+this.wp=0;
+this.avail=0;
+this.primed=false;
+this.state=null;
+this.destroyed=false;
+this.port.onmessage=e=>{if(e.data==='destroy')this.destroy();else if(typeof e.data==='number')this.level=e.data};
+(async()=>{const m=await o({locateFile:e=>e,wasmBinary:p.wasmBinary});if(this.destroyed)return;this.state=new a(m,FRAME,sampleRate);this.state.denoise=true})()
 }
-fs.writeFileSync(path.join(out, 'speex.worklet.js'), patched)
+process(inputs,outputs){
+const input=inputs[0]&&inputs[0][0];
+const output=outputs[0]&&outputs[0][0];
+if(!output)return !this.destroyed;
+const n=output.length;
+if(input&&this.state){
+for(let i=0;i<n;i++){
+const v=input[i];
+this.inBuf[this.fill++]=v>1?1:v<-1?-1:v;
+if(this.fill===FRAME){
+this.state.noiseSuppress=this.level;
+this.state.process(this.inBuf);
+for(let k=0;k<FRAME;k++){this.ring[this.wp]=this.inBuf[k];this.wp=(this.wp+1)%RING}
+this.avail=Math.min(RING,this.avail+FRAME);
+this.fill=0
+}
+}
+}
+if(!this.primed&&this.avail>=FRAME+n)this.primed=true;
+if(this.primed&&this.avail>=n){
+for(let i=0;i<n;i++){output[i]=this.ring[this.rp];this.rp=(this.rp+1)%RING}
+this.avail-=n
+}else{
+output.fill(0);
+this.primed=false
+}
+return !this.destroyed
+}
+destroy(){this.destroyed=true;if(this.state){this.state.destroy();this.state=null}}
+}
+registerProcessor('@sapphi-red/web-noise-suppressor/speex',ObsSpeex);`
+
+const speexSrc = fs.readFileSync(path.join(ns, 'speex', 'workletProcessor.js'), 'utf8')
+const startMarker = 'const s=(e,{bufferSize:t,maxChannels:n,sampleRate:r})=>{'
+const endMarker = 'registerProcessor(`@sapphi-red/web-noise-suppressor/speex`,c);'
+const start = speexSrc.indexOf(startMarker)
+const end = speexSrc.indexOf(endMarker)
+if (start < 0 || end < start) throw new Error('speex worklet layout changed, cannot rebuild the OBS processor')
+const rebuilt = speexSrc.slice(0, start) + obsSpeex + speexSrc.slice(end + endMarker.length)
+fs.writeFileSync(path.join(out, 'speex.worklet.js'), rebuilt)

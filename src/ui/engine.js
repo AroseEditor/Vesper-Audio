@@ -7,11 +7,9 @@ const PREBUFFER_HOPS = 2
 const DFN3_DRY_DELAY = 0.052
 const DPDFNET_DRY_DELAY = 0.082
 const MAX_ATTENUATION_DB = 45
-const MAKEUP_DB = { rnnoise: 7, speex: 2, dfn3: 0, dpdfnet: 0 }
 const WATCH_MS = 2000
 const WATCH_WARMUP_S = 8
 const WATCH_STRIKES = 3
-const db = v => Math.pow(10, v / 20)
 const asset = file => new URL(file, import.meta.url).href
 
 function leak(strength) {
@@ -191,9 +189,9 @@ export class Engine {
     this.gain.gain.setTargetAtTime(Math.max(0, cfg.gain) / 100, ctx.currentTime, 0.02)
     const gated = this.active === 'custom' || this.active === 'heavy'
     const wantVoice = gated && cfg.voiceprint && cfg.speaker
-    if (wantVoice && (!this.voice || this.voice.printId !== cfg.voiceprint.id || this.voice.speaker !== cfg.speaker)) {
+    if (wantVoice && (!this.voice || this.voice.printId !== cfg.voiceprint.id || this.voice.speaker !== cfg.speaker || this.voice.sensitivity !== cfg.voiceSensitivity)) {
       if (this.voice) this.voice.stop()
-      this.voice = new VoiceGate(ctx, this.fxOut, this.gate, cfg.voiceprint, cfg.speaker, s => this.onVoiceState(s))
+      this.voice = new VoiceGate(ctx, this.fxOut, this.gate, cfg.voiceprint, cfg.speaker, s => this.onVoiceState(s), cfg.voiceSensitivity)
       await this.voice.start()
     } else if (!wantVoice && this.voice) {
       this.voice.stop()
@@ -250,13 +248,11 @@ export class Engine {
     if (mode === 'off') {
       this.fxIn.connect(this.fxOut)
     } else if (mode === 'rnnoise') {
-      this.fxOut.gain.value = db(MAKEUP_DB.rnnoise)
       const node = new RnnoiseWorkletNode(ctx, { maxChannels: 1, wasmBinary: await this.wasmBinary('rnnoise') })
       this.fxIn.connect(node).connect(this.fxOut)
       add(node)
       this.fxNodes = { rnnoise: node }
     } else if (mode === 'speex') {
-      this.fxOut.gain.value = db(MAKEUP_DB.speex)
       const node = new AudioWorkletNode(ctx, SPEEX_ID, {
         channelCount: 1,
         channelCountMode: 'explicit',
@@ -268,7 +264,6 @@ export class Engine {
     } else {
       const { node, kind } = await this.aiDenoiser(cfg)
       this.state.denoiser = kind
-      this.fxOut.gain.value = db(MAKEUP_DB[kind])
       const wet = ctx.createGain()
       const dry = ctx.createGain()
       const delay = ctx.createDelay(0.5)
