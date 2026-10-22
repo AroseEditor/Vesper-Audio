@@ -310,3 +310,5 @@ input[type="range"]:disabled { opacity: 0.4; cursor: not-allowed; }
 ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.16); border-radius: 999px; border: 3px solid var(--bg); }
 ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.28); }
 ::-webkit-scrollbar-track { background: transparent; }
+.step-title { font-size: 15px; font-weight: 600; margin: 12px 0 2px; }
+#dlg-body .inline-check { display: flex; margin: 8px 0; }

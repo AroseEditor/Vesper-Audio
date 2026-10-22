@@ -1,61 +1,29 @@
 import { hydrate, icon } from './icons.js'
 import { Engine } from './engine.js'
-import { Enroller, loadSpeaker, loadVad, buildPrint, pcmToBytes, bytesToPcm, MIN_SPEECH_SECONDS } from './voice.js'
+import { h, $ } from './dom.js'
+import { Personal } from './personal.js'
+import { Diag } from './diag.js'
 
 const api = window.vesper
-const $ = id => document.getElementById(id)
 const engine = new Engine()
+let personal = null
+let diag = null
 
-const PARAGRAPHS = {
-  en: {
-    label: 'English',
-    text: 'When the sunlight strikes raindrops in the air, they act as a prism and form a rainbow. The rainbow is a division of white light into many beautiful colors. These take the shape of a long round arch, with its path high above, and its two ends apparently beyond the horizon. There is, according to legend, a boiling pot of gold at one end. People look, but no one ever finds it. When a man looks for something beyond his reach, his friends say he is looking for the pot of gold at the end of the rainbow.'
-  },
-  hi: {
-    label: 'हिन्दी',
-    text: 'भारत एक विशाल और विविधताओं से भरा हुआ देश है। यहाँ हर कुछ किलोमीटर पर बोली, खान-पान और पहनावा बदल जाता है। सुबह की ठंडी हवा में चाय की खुशबू फैल जाती है और गलियों में बच्चों की हँसी गूँजने लगती है। पहाड़ों से लेकर समंदर तक, हर जगह की अपनी एक अलग कहानी है। लोग मिल-जुलकर त्योहार मनाते हैं, एक-दूसरे की मदद करते हैं और नई उम्मीदों के साथ आगे बढ़ते हैं। जब कोई अपने सपनों के पीछे चलता है, तो पूरी दुनिया उसके लिए रास्ता बना देती है।'
-  }
-}
-const PRESET_LABEL = { custom: 'Custom', heavy: 'Custom Heavy', clearcast: 'ClearCast' }
-const ENROLL_STEPS = [
-  { id: 'en', lang: 'en', title: 'read in English', seconds: 12, text: PARAGRAPHS.en.text },
-  { id: 'hi', lang: 'hi', title: 'read in Hindi', seconds: 12, text: PARAGRAPHS.hi.text },
-  { id: 'free', lang: 'en', title: 'talk freely', seconds: 10, text: 'Tell Vesper about your day in whichever language you normally speak. Mix Hindi and English if that is how you talk.' },
-  { id: 'laugh', lang: 'en', title: 'laugh', seconds: 3, text: 'Now laugh out loud for a few seconds.' }
-]
-const NVIDIA = 0x10de
-const MIN_VRAM_MB = 2048
+const PRESET_LABEL = { personal: 'Personal', clearcast: 'ClearCast' }
+const BASIC_LABEL = { speex: 'Speex', speexzero: 'Speex zero latency', rnnoise: 'RNNoise' }
 
 const state = {
   settings: null,
   devices: [],
   driver: null,
-  speakers: {},
-  speakerLoading: {},
-  gpus: [],
   devicesKey: '',
   denoiserUrl: '',
-  denoiserHeavyUrl: '',
   notices: {},
   info: { version: '', testMode: false },
-  voice: null,
   busy: false
 }
 
 const reason = err => String((err && err.message) || err).replace(/^Error invoking remote method '[^']*': (Error: )?/, '')
-
-function h(tag, props = {}, ...kids) {
-  const el = document.createElement(tag)
-  for (const [k, v] of Object.entries(props)) {
-    if (k === 'class') el.className = v
-    else if (k === 'text') el.textContent = v
-    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v)
-    else if (v === true) el.setAttribute(k, '')
-    else if (v !== false && v != null) el.setAttribute(k, v)
-  }
-  for (const kid of kids.flat()) if (kid != null) el.append(kid)
-  return el
-}
 
 const inputs = () => state.devices.filter(d => d.flow === 'capture' && !d.vac)
 const outputs = () => state.devices.filter(d => d.flow === 'render' && !d.vac)
@@ -81,13 +49,9 @@ function gainFor(device) {
   return device && state.settings.gains[device.name] != null ? state.settings.gains[device.name] : 100
 }
 
-const tierOf = () => (state.settings.aiPreset === 'heavy' ? 'heavy' : 'small')
-
 function engineConfig() {
   const s = state.settings
   const input = currentInput()
-  const tier = tierOf()
-  const loaded = state.speakers[tier]
   return {
     inputName: input ? input.name : '',
     cableName: cableDevice() ? cableDevice().name : '',
@@ -99,13 +63,10 @@ function engineConfig() {
     basic: s.basic,
     basicPreset: s.basicPreset,
     speexDb: s.speexDb,
-    voiceSensitivity: s.voiceSensitivity,
     monitor: s.monitor,
     boardVolume: s.boardVolume,
-    voiceprint: s.voiceprints[tier] || null,
-    speaker: loaded ? loaded.speaker : null,
-    denoiserUrl: state.denoiserUrl,
-    denoiserHeavyUrl: state.denoiserHeavyUrl
+    personalUrl: personal ? personal.url() : '',
+    denoiserUrl: state.denoiserUrl
   }
 }
 
@@ -131,80 +92,15 @@ function sync() {
 
 async function prepare() {
   const s = state.settings
-  if (!s.ai) return
+  if (!s.ai || s.aiPreset !== 'clearcast' || state.denoiserUrl) return
   try {
-    if (!state.denoiserUrl) {
-      notice('voice', { text: 'Downloading the AI model' })
-      state.denoiserUrl = await api.invoke('model:ensure', 'denoiser')
-    }
-    if (s.aiPreset === 'heavy' && !state.denoiserHeavyUrl) {
-      notice('voice', { text: 'Downloading the Heavy AI model' })
-      state.denoiserHeavyUrl = await api.invoke('model:ensure', 'denoiserHeavy')
-    }
+    notice('voice', { text: 'Downloading the AI model' })
+    state.denoiserUrl = await api.invoke('model:ensure', 'denoiser')
+    notice('voice', null)
   } catch (err) {
     state.denoiserUrl = ''
     notice('voice', { text: 'The AI model could not be downloaded, using the built-in light model: ' + reason(err) })
-    return
   }
-  if (s.aiPreset === 'clearcast') {
-    notice('voice', null)
-    return
-  }
-  try {
-    if (s.voiceSamples.length) {
-      const tier = tierOf()
-      notice('voice', { text: 'Preparing your voice model' })
-      await ensureSpeaker(tier)
-      if (!s.voiceprints[tier]) await rebuildPrint(tier)
-    }
-  } catch (err) {
-    notice('voice', { text: 'Voice model unavailable: ' + reason(err) })
-    return
-  }
-  notice('voice', null)
-}
-
-async function gpuVendor() {
-  if (!navigator.gpu) return ''
-  const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' })
-  return adapter && adapter.info ? adapter.info.vendor : ''
-}
-
-const gpuInfo = () => state.gpus.filter(g => g.vendorId === NVIDIA).sort((a, b) => b.vramMb - a.vramMb)[0] || null
-const gpuQualifies = () => {
-  const g = gpuInfo()
-  return Boolean(g && g.vramMb > MIN_VRAM_MB)
-}
-
-async function ensureSpeaker(tier) {
-  if (state.speakers[tier]) return state.speakers[tier].speaker
-  if (!state.speakerLoading[tier]) {
-    state.speakerLoading[tier] = (async () => {
-      if (tier === 'heavy') {
-        try {
-          if ((await gpuVendor()) !== 'nvidia') throw new Error('the NVIDIA graphics card is not active yet, restart Vesper Audio')
-          const speaker = await loadSpeaker(await api.invoke('model:ensure', 'speakerHeavy'), 'webgpu')
-          state.speakers.heavy = { speaker }
-          return speaker
-        } catch (err) {
-          notice('heavy', { text: 'Heavy voice model could not use the graphics card (' + reason(err) + '). Using the standard voice model.' })
-        }
-      }
-      const speaker = await loadSpeaker(await api.invoke('model:ensure', 'speakerSmall'), 'wasm')
-      state.speakers[tier] = { speaker }
-      return speaker
-    })().finally(() => (state.speakerLoading[tier] = null))
-  }
-  return state.speakerLoading[tier]
-}
-
-async function rebuildPrint(tier, onProgress) {
-  const speaker = await ensureSpeaker(tier)
-  const samples = await api.invoke('voice:load')
-  const progress = onProgress || (p => notice('voice', { text: 'Learning your voice ' + Math.round(p * 100) + '%' }))
-  const print = await buildPrint(speaker, samples.map(x => bytesToPcm(x.bytes)), progress, tier === 'heavy' ? 0.38 : 0.4)
-  state.settings.voiceprints = { ...state.settings.voiceprints, [tier]: print }
-  await save({ voiceprints: state.settings.voiceprints })
 }
 
 async function save(patch) {
@@ -310,21 +206,10 @@ function renderDevices() {
   )
 }
 
-function voiceSummary() {
-  const samples = state.settings.voiceSamples
-  if (!samples.length) return 'No voice recorded yet. Record your voice once to enable Custom.'
-  const label = x => (x.language === 'en+hi' ? 'English and Hindi' : PARAGRAPHS[x.language] ? PARAGRAPHS[x.language].label : x.language)
-  const langs = [...new Set(samples.map(label))]
-  const seconds = Math.round(samples.reduce((n, x) => n + x.seconds, 0))
-  return `Your voice is saved (${langs.join(' and ')}, ${seconds} s). Custom is best and needs no slider.`
-}
-
 async function pickPreset(v) {
   closeMenus()
-  if (v === 'heavy') return chooseHeavy()
   await save({ aiPreset: v })
   renderHome()
-  if (v === 'custom' && state.settings.ai && !state.settings.voiceSamples.length) await enroll()
   sync()
 }
 
@@ -335,13 +220,12 @@ function renderHome() {
   $('basic-on').disabled = s.ai
   $('basic-hint').hidden = !s.ai
   $('monitor-on').checked = s.monitor
-  $('ai-preset-text').textContent = PRESET_LABEL[s.aiPreset] || 'Custom'
+  $('ai-preset-text').textContent = PRESET_LABEL[s.aiPreset] || 'Personal'
   menuItems(
     document.querySelector('[data-select="ai-preset"] .menu'),
     [
-      { value: 'custom', label: 'Custom', tag: 'light', small: 'Speak a paragraph once and the AI learns your voice. It keeps your voice and laughs and drops everything else. About 17 MB, runs on the CPU.' },
-      { value: 'heavy', label: 'Custom Heavy', tag: 'NVIDIA GPU', small: 'A much larger voice-lock model on your graphics card for the most accurate result. Fullband 48 kHz denoising plus the graphics card voice lock. For PCs with an NVIDIA graphics card above 2 GB VRAM. About 125 MB.' },
-      { value: 'clearcast', label: 'ClearCast', small: 'Studio-grade AI speech cleanup in the style of SteelSeries Sonar. Strength is adjustable.' }
+      { value: 'personal', label: 'Personal', tag: 'about 45 ms', small: 'A model that is fine-tuned on your own voice, on this PC. No lookahead, so it is the lowest delay a neural model allows. Works right away and gets better when you train it.' },
+      { value: 'clearcast', label: 'ClearCast', small: 'Studio-grade AI speech cleanup. Best sound, but it adds about 90 ms of delay. Strength is adjustable.' }
     ],
     s.aiPreset,
     pickPreset
@@ -351,14 +235,15 @@ function renderHome() {
   $('ai-strength').value = s.aiStrength
   $('ai-strength-out').textContent = s.aiStrength + '%'
   fill($('ai-strength'))
-  $('voice-status').textContent = voiceSummary()
-  $('voice-enroll').textContent = s.voiceSamples.length ? 'Re-record' : 'Record voice'
-  $('basic-preset-text').textContent = s.basicPreset === 'speex' ? 'Speex' : 'RNNoise'
+  $('voice-status').textContent = personal.note()
+  $('voice-enroll').textContent = personal.button()
+  $('basic-preset-text').textContent = BASIC_LABEL[s.basicPreset] || 'RNNoise'
   menuItems(
     document.querySelector('[data-select="basic-preset"] .menu'),
     [
-      { value: 'speex', label: 'Speex', small: 'Low CPU usage, low quality. Suppression Level from -60 dB (strongest) to 0 dB (off).' },
-      { value: 'rnnoise', label: 'RNNoise', small: 'Good quality, more CPU usage.' }
+      { value: 'speex', label: 'Speex', small: 'Low CPU usage, low quality. Suppression Level from -60 dB (strongest) to 0 dB (off). Adds about 15 ms.' },
+      { value: 'speexzero', label: 'Speex zero latency', tag: '0 ms', small: 'Applies Speex gains to your live voice with a minimum phase filter, so nothing is delayed. Slightly less precise at the start of words.' },
+      { value: 'rnnoise', label: 'RNNoise', small: 'Good quality, more CPU usage. Adds about 20 ms.' }
     ],
     s.basicPreset,
     async v => {
@@ -368,7 +253,7 @@ function renderHome() {
       sync()
     }
   )
-  $('basic-sub').hidden = s.basicPreset !== 'speex'
+  $('basic-sub').hidden = s.basicPreset !== 'speex' && s.basicPreset !== 'speexzero'
   $('speex-db').value = s.speexDb
   $('speex-db-out').textContent = s.speexDb + ' dB'
   fill($('speex-db'))
@@ -448,12 +333,6 @@ function renderBoard() {
   $('sound-grid').replaceChildren(add, ...tiles)
 }
 
-const SENSITIVITY = {
-  relaxed: { label: 'Relaxed', small: 'Adds 0.5 s of delay. Never cuts you, but other voices leak in more.' },
-  balanced: { label: 'Balanced', small: 'Recommended. Adds 0.8 s of delay. Keeps your voice and blocks other people and breaths.' },
-  strict: { label: 'Strict', small: 'Adds 1.0 s of delay. Blocks other voices hardest, best for streaming and recording.' }
-}
-
 function renderUpdate() {
   const u = state.update || { state: 'idle' }
   const rows = {
@@ -478,19 +357,9 @@ function renderSettings() {
   $('set-tray').checked = state.settings.closeToTray
   renderUpdate()
   $('version').textContent = 'Vesper Audio ' + state.info.version + (vacOut() && vacIn() ? '  |  Vesper Audio Cable ready' : '')
-  const level = SENSITIVITY[state.settings.voiceSensitivity] ? state.settings.voiceSensitivity : 'balanced'
-  $('sens-text').textContent = SENSITIVITY[level].label
-  menuItems(
-    document.querySelector('[data-select="sensitivity"] .menu'),
-    Object.entries(SENSITIVITY).map(([value, v]) => ({ value, label: v.label, small: v.small })),
-    level,
-    async v => {
-      closeMenus()
-      await save({ voiceSensitivity: v })
-      renderAll()
-      sync()
-    }
-  )
+  $('set-voice-text').textContent = personal.note()
+  $('set-voice').textContent = personal.button()
+  $('set-voice-remove').hidden = !personal.model()
 }
 
 function renderAll() {
@@ -569,212 +438,6 @@ function bindMenus() {
     if ($('overlay').hidden) return
     const dismiss = $('dlg-actions').firstElementChild
     if (dismiss && !dismiss.classList.contains('primary')) dismiss.click()
-  })
-}
-
-async function chooseHeavy() {
-  const g = gpuInfo()
-  const ok = gpuQualifies()
-  const detected = g ? `${g.name}, ${(g.vramMb / 1024).toFixed(1)} GB VRAM` : 'No NVIDIA graphics card was detected on this PC.'
-  return new Promise(resolve => {
-    const finish = value => {
-      closeDialog()
-      resolve(value)
-    }
-    const enable = async () => {
-      const bar = h('i')
-      const text = h('p', { class: 'muted', text: 'Downloading the Heavy models. This happens once.' })
-      const off = api.on('model:progress', p => (bar.style.width = Math.round(p.value * 100) + '%'))
-      $('dlg-body').replaceChildren(text, h('div', { class: 'progress' }, bar))
-      $('dlg-actions').replaceChildren()
-      try {
-        state.denoiserUrl = await api.invoke('model:ensure', 'denoiser')
-        bar.style.width = '0%'
-        state.denoiserHeavyUrl = await api.invoke('model:ensure', 'denoiserHeavy')
-        bar.style.width = '0%'
-        await api.invoke('model:ensure', 'speakerHeavy')
-      } catch (err) {
-        off()
-        $('dlg-title').textContent = 'Heavy models could not be downloaded'
-        $('dlg-body').replaceChildren(h('p', { class: 'error', text: reason(err) }))
-        $('dlg-actions').replaceChildren(h('button', { class: 'btn', type: 'button', text: 'Close', onclick: () => finish(false) }))
-        return
-      }
-      off()
-      await save({ aiPreset: 'heavy', ai: true, basic: false })
-      if ((await gpuVendor()) !== 'nvidia') {
-        $('dlg-title').textContent = 'Restart to use your NVIDIA graphics card'
-        $('dlg-body').replaceChildren(h('p', { text: 'Vesper Audio has to restart once so Windows runs it on the NVIDIA graphics card. Your settings are saved.' }))
-        $('dlg-actions').replaceChildren(
-          h('button', { class: 'btn', type: 'button', text: 'Later', onclick: () => finish(true) }),
-          h('button', { class: 'btn primary', type: 'button', text: 'Restart now', onclick: () => api.invoke('app:relaunch') })
-        )
-        return
-      }
-      finish(true)
-      renderAll()
-      if (!state.settings.voiceSamples.length) await enroll()
-      sync()
-    }
-    dialog({
-      title: 'Custom Heavy',
-      body: [
-        h('p', { text: 'Custom Heavy adds a much larger voice-lock model that runs on your NVIDIA graphics card, so it can check who is speaking far faster than a processor could. It is made for PCs with an NVIDIA graphics card that has more than 2 GB of VRAM.' }),
-        h('p', { class: ok ? 'ok' : 'error', text: ok ? 'Detected: ' + detected : g ? detected + ' Heavy needs more than 2 GB.' : detected }),
-        h('p', { class: 'muted', text: 'About 125 MB is downloaded once.' })
-      ],
-      actions: [
-        { label: 'Cancel', onClick: () => finish(false) },
-        { label: 'Enable Heavy', primary: true, disabled: !ok, onClick: enable }
-      ]
-    })
-  })
-}
-
-async function enroll() {
-  const input = currentInput()
-  if (!input) {
-    dialog({ title: 'No microphone', body: h('p', { text: 'Pick an input device first.' }), actions: [{ label: 'Close', onClick: closeDialog }] })
-    return false
-  }
-  const bar = h('i')
-  const info = h('p', { class: 'muted', text: 'Preparing the voice model. A download happens the first time only.' })
-  const off = api.on('model:progress', p => (bar.style.width = Math.round(p.value * 100) + '%'))
-  dialog({ title: 'Preparing voice recognition', body: [info, h('div', { class: 'progress' }, bar)], actions: [] })
-  try {
-    await ensureSpeaker(tierOf())
-  } catch (err) {
-    off()
-    dialog({ title: 'Voice model unavailable', body: h('p', { class: 'error', text: reason(err) }), actions: [{ label: 'Close', onClick: closeDialog }] })
-    return false
-  }
-  off()
-  await engine.apply({ ...engineConfig(), ai: true, aiPreset: 'custom', basic: false, voiceprint: null, speaker: null, monitor: false })
-  if (!engine.ctx) {
-    dialog({ title: 'Microphone unavailable', body: h('p', { class: 'error', text: engine.state.error || 'The audio engine could not start.' }), actions: [{ label: 'Close', onClick: closeDialog }] })
-    return false
-  }
-  return new Promise(resolve => {
-    const total = ENROLL_STEPS.reduce((n, x) => n + x.seconds, 0)
-    let enroller = null
-    let spoken = 0
-    let step = 0
-    let base = 0
-    let stepStart = 0
-    const status = h('p', { class: 'muted', text: 'Press Start, then follow the steps in your normal voice. Accent, speed and mixing Hindi with English are all fine.' })
-    const heading = h('h3', { class: 'step-title', text: '' })
-    const paragraph = h('div', { class: 'paragraph' })
-    const progress = h('i')
-    const clock = h('span', { class: 'muted', text: '0 s' })
-    const words = () => [...paragraph.children]
-    const drawStep = () => {
-      const s = ENROLL_STEPS[step]
-      heading.textContent = `Step ${step + 1} of ${ENROLL_STEPS.length}: ${s.title}`
-      paragraph.replaceChildren(...s.text.split(' ').map(w => h('span', { text: w + ' ', lang: s.lang })))
-    }
-    const close = ok => {
-      if (enroller) enroller.stop()
-      enroller = null
-      closeDialog()
-      resolve(ok)
-      sync()
-    }
-    let finishNow = null
-    const next = () => {
-      base += ENROLL_STEPS[step].seconds
-      if (step >= ENROLL_STEPS.length - 1) return finishNow()
-      step++
-      stepStart = spoken
-      if (enroller) enroller.mode = ENROLL_STEPS[step].id === 'laugh' ? 'laugh' : 'speech'
-      drawStep()
-    }
-    const begin = async () => {
-      try {
-        enroller = new Enroller(engine.ctx, engine.fxOut, update, await loadVad())
-      } catch (err) {
-        status.className = 'error'
-        status.textContent = reason(err)
-        return
-      }
-      status.textContent = 'Listening. Follow the steps, you can press Stop once you have spoken for ' + MIN_SPEECH_SECONDS + ' seconds.'
-      buttons('recording')
-    }
-    const buttons = mode => {
-      const list = [h('button', { class: 'btn', type: 'button', text: 'Cancel', onclick: () => close(false) })]
-      if (mode === 'ready') list.push(h('button', { class: 'btn primary', type: 'button', text: 'Start', onclick: begin }))
-      if (mode === 'recording') {
-        list.push(h('button', { class: 'btn', type: 'button', id: 'enroll-skip', text: 'Skip step', onclick: next }))
-        list.push(h('button', { class: 'btn primary', type: 'button', id: 'enroll-stop', text: `Stop (needs ${MIN_SPEECH_SECONDS} s)`, disabled: true, onclick: () => finishNow() }))
-      }
-      $('dlg-actions').replaceChildren(...list)
-    }
-    const update = seconds => {
-      spoken = seconds
-      const s = ENROLL_STEPS[step]
-      const inStep = Math.min(seconds - stepStart, s.seconds)
-      progress.style.width = Math.min(100, ((base + inStep) / total) * 100) + '%'
-      clock.textContent = Math.round(seconds) + ' s'
-      const read = s.id === 'free' || s.id === 'laugh' ? 0 : Math.floor((inStep / s.seconds) * words().length)
-      words().forEach((w, i) => w.classList.toggle('done', i < read))
-      const stop = $('enroll-stop')
-      if (stop && seconds >= MIN_SPEECH_SECONDS) {
-        stop.disabled = false
-        stop.textContent = 'Stop'
-      }
-      if (seconds - stepStart >= s.seconds) next()
-    }
-    finishNow = async () => {
-      if (!enroller) return
-      const taking = enroller
-      enroller = null
-      const audio = await taking.stop()
-      status.className = 'muted'
-      status.textContent = 'Learning your voice'
-      $('dlg-actions').replaceChildren()
-      try {
-        state.settings.voiceSamples = await api.invoke('voice:save', pcmToBytes(audio), { replace: true, language: 'en+hi', seconds: spoken })
-        state.settings.voiceprints = {}
-        await rebuildPrint(tierOf(), p => (status.textContent = 'Learning your voice ' + Math.round(p * 100) + '%'))
-        await save({ ai: true, aiPreset: state.settings.aiPreset === 'clearcast' ? 'custom' : state.settings.aiPreset, basic: false })
-        renderAll()
-        close(true)
-      } catch (err) {
-        status.className = 'error'
-        status.textContent = reason(err)
-        $('dlg-actions').replaceChildren(
-          h('button', { class: 'btn', type: 'button', text: 'Close', onclick: () => close(false) }),
-          h('button', {
-            class: 'btn primary',
-            type: 'button',
-            text: 'Try again',
-            onclick: () => {
-              step = 0
-              base = 0
-              stepStart = 0
-              drawStep()
-              update(0)
-              status.className = 'muted'
-              status.textContent = 'Press Start when you are ready.'
-              buttons('ready')
-            }
-          })
-        )
-      }
-    }
-    dialog({
-      title: 'Teach Vesper your voice',
-      body: [
-        status,
-        heading,
-        paragraph,
-        h('div', { class: 'progress' }, progress),
-        h('div', { class: 'row' }, clock),
-        h('p', { class: 'hint', text: 'Your recording stays on this PC. It is only used to recognise your voice.' })
-      ],
-      actions: []
-    })
-    drawStep()
-    buttons('ready')
   })
 }
 
@@ -1069,13 +732,7 @@ function bindControls() {
 
   $('ai-on').addEventListener('change', async e => {
     const on = e.target.checked
-    if (on && state.settings.aiPreset !== 'clearcast' && !state.settings.voiceSamples.length) {
-      await save({ ai: true, basic: false })
-      const ok = await enroll()
-      if (!ok) await save({ ai: false })
-    } else {
-      await save({ ai: on, basic: on ? false : state.settings.basic })
-    }
+    await save({ ai: on, basic: on ? false : state.settings.basic })
     renderHome()
     sync()
   })
@@ -1100,10 +757,7 @@ function bindControls() {
     await save({ speexDb: Number(e.target.value) })
     sync()
   })
-  $('voice-enroll').addEventListener('click', async () => {
-    const ok = await enroll()
-    if (ok) renderAll()
-  })
+  $('voice-enroll').addEventListener('click', () => personal.open())
 
   let levelTimer = null
   $('level').addEventListener('input', e => {
@@ -1159,10 +813,9 @@ function bindControls() {
   $('set-own').addEventListener('click', () => installOwnDriver())
   $('set-update').addEventListener('click', () => api.invoke('update:act'))
   $('set-uninstall').addEventListener('click', () => uninstallDriver())
-  $('set-voice').addEventListener('click', async () => {
-    const ok = await enroll()
-    if (ok) renderAll()
-  })
+  $('set-voice').addEventListener('click', () => personal.open())
+  $('set-diag').addEventListener('click', () => diag.run())
+  $('set-voice-remove').addEventListener('click', () => personal.remove())
   $('set-repo').addEventListener('click', () => api.invoke('app:repo'))
 }
 
@@ -1176,23 +829,19 @@ async function boot() {
   hydrate()
   state.info = await api.invoke('app:info')
   state.settings = await api.invoke('settings:get')
+  personal = new Personal({ api, engine, state, dialog, closeDialog, notice, save, sync, reason, renderAll })
+  diag = new Diag({ api, engine, dialog, closeDialog, reason })
   if (state.settings.speexDb > 0) await save({ speexDb: -state.settings.speexDb })
-  state.gpus = await api.invoke('system:gpus').catch(() => [])
-  if (state.settings.aiPreset === 'heavy' && !gpuQualifies()) {
-    await save({ aiPreset: 'custom' })
-    notice('heavy', { text: 'Custom Heavy needs an NVIDIA graphics card with more than 2 GB of VRAM. Vesper Audio is using Custom instead.' })
-  }
   bindMenus()
   bindControls()
   engine.onSoundEnd = () => renderBoard()
-  engine.onVoiceState = s => (state.voice = s)
   api.on('app:wake', () => engine.recover('Windows woke up, so Vesper Audio restarted the audio.'))
   state.update = await api.invoke('update:status').catch(() => null)
   api.on('update:status', s => {
     state.update = s
     renderUpdate()
   })
-  if (state.info.testMode) window.__vesper = { engine, state, api, enroll, loadVad, installDriver, installOwnDriver, uninstallDriver, save, sync, refreshDevices, config: engineConfig, ensureSpeaker, rebuildPrint, tierOf }
+  if (state.info.testMode) window.__vesper = { engine, state, api, personal, installDriver, installOwnDriver, uninstallDriver, save, sync, refreshDevices, config: engineConfig }
   await refreshDevices()
   state.driver = await api.invoke('driver:status').catch(() => null)
   renderAll()

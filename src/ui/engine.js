@@ -1,9 +1,8 @@
 import { RnnoiseWorkletNode, loadRnnoise } from './vendor/noise.js'
-import { VoiceGate, loadVad } from './voice.js'
 
 const SPEEX_ID = '@sapphi-red/web-noise-suppressor/speex'
 const HOP = 480
-const PREBUFFER_HOPS = 3
+const PREBUFFER_HOPS = 2
 const DFN3_MODEL_DELAY = 0.032
 const DPDFNET_MODEL_DELAY = 0.062
 const RELEASE_MS = 90
@@ -40,8 +39,8 @@ export async function resolveDevice(kind, name) {
 }
 
 function modeOf(cfg) {
-  if (cfg.ai) return cfg.aiPreset === 'heavy' ? 'heavy' : cfg.aiPreset === 'clearcast' ? 'clearcast' : 'custom'
-  if (cfg.basic) return cfg.basicPreset === 'speex' ? 'speex' : 'rnnoise'
+  if (cfg.ai) return cfg.aiPreset === 'clearcast' ? 'clearcast' : 'personal'
+  if (cfg.basic) return cfg.basicPreset === 'speex' ? 'speex' : cfg.basicPreset === 'speexzero' ? 'speexzero' : 'rnnoise'
   return 'off'
 }
 
@@ -58,11 +57,9 @@ export class Engine {
     this.wasm = {}
     this.buffers = new Map()
     this.playing = new Map()
-    this.voice = null
     this.pending = null
     this.draining = null
     this.onSoundEnd = () => {}
-    this.onVoiceState = () => {}
     this.stats = { underruns: 0, queued: 0, backlog: 0, target: PREBUFFER_HOPS * HOP, rebuffers: 0, drops: 0 }
     this.forceLight = false
     this.watch = null
@@ -124,20 +121,14 @@ export class Engine {
       }
     })
     const ctx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' })
-    await Promise.all(['./tap.worklet.js', './denoise.worklet.js', './vendor/rnnoise.worklet.js', './vendor/speex.worklet.js'].map(f => ctx.audioWorklet.addModule(asset(f))))
+    await Promise.all(['./limit.worklet.js', './record.worklet.js', './denoise.worklet.js', './vendor/rnnoise.worklet.js', './vendor/speex.worklet.js'].map(f => ctx.audioWorklet.addModule(asset(f))))
     this.stream = stream
     this.ctx = ctx
     this.src = ctx.createMediaStreamSource(stream)
     this.gain = ctx.createGain()
     this.fxIn = ctx.createGain()
     this.fxOut = ctx.createGain()
-    this.gate = ctx.createGain()
-    this.limiter = ctx.createDynamicsCompressor()
-    this.limiter.threshold.value = -2
-    this.limiter.knee.value = 0
-    this.limiter.ratio.value = 20
-    this.limiter.attack.value = 0.002
-    this.limiter.release.value = 0.12
+    this.limiter = new AudioWorkletNode(ctx, 'vesper-limit', { channelCount: 1, channelCountMode: 'explicit' })
     this.micOut = ctx.createGain()
     this.monitorGain = ctx.createGain()
     this.bus = ctx.createGain()
@@ -149,33 +140,25 @@ export class Engine {
     this.outAnalyser = ctx.createAnalyser()
     this.outAnalyser.fftSize = 1024
     this.sink = ctx.createMediaStreamDestination()
-    this.monitorDest = ctx.createMediaStreamDestination()
     this.sbDest = ctx.createMediaStreamDestination()
     this.src.connect(this.gain)
     this.gain.connect(this.fxIn)
     this.gain.connect(this.analyser)
-    this.fxOut.connect(this.gate)
+    this.fxOut.connect(this.limiter)
     this.fxOut.connect(this.fxAnalyser)
-    this.gate.connect(this.limiter)
     this.limiter.connect(this.micOut)
     this.micOut.connect(this.bus)
     this.micOut.connect(this.monitorGain)
     this.micOut.connect(this.outAnalyser)
-    this.monitorGain.connect(this.monitorDest)
     this.sbBus.connect(this.bus)
     this.sbBus.connect(this.sbDest)
     this.bus.connect(this.sink)
-    const cableId = await resolveDevice('audiooutput', cfg.cableName)
-    this.state.hasCable = Boolean(cableId)
-    if (cableId) {
-      await ctx.setSinkId(cableId)
-      this.bus.connect(ctx.destination)
-    }
-    this.monitorEl = new Audio()
-    this.monitorEl.srcObject = this.monitorDest.stream
+    this.cableEl = new Audio()
+    this.cableEl.srcObject = this.sink.stream
     this.sbEl = new Audio()
     this.sbEl.srcObject = this.sbDest.stream
     this.mode = ''
+    this.sinkKey = ''
     const dither = ctx.createBuffer(1, ctx.sampleRate, ctx.sampleRate)
     const noise = dither.getChannelData(0)
     for (let i = 0; i < noise.length; i++) noise[i] = (Math.random() - 0.5) * 2 * DITHER
@@ -227,7 +210,7 @@ export class Engine {
       this.lastFrozenFix = Date.now()
       return this.recover('The microphone went silent, so Vesper Audio reconnected it.')
     }
-    if (this.active !== 'custom' && this.active !== 'heavy' && this.active !== 'clearcast') return
+    if (this.active !== 'personal' && this.active !== 'clearcast') return
     const lost = this.stats.underruns - this.lastUnderruns
     this.lastUnderruns = this.stats.underruns
     this.stall = lost >= ctx.sampleRate * (HEALTH_MS / 1000) * 0.8 ? this.stall + 1 : 0
@@ -268,7 +251,7 @@ export class Engine {
   async chain(cfg) {
     const mode = modeOf(cfg)
     const ctx = this.ctx
-    if (mode !== this.mode || this.denoiserKey !== (mode === 'heavy' ? cfg.denoiserHeavyUrl : cfg.denoiserUrl)) {
+    if (mode !== this.mode || this.denoiserKey !== this.keyFor(mode, cfg)) {
       const old = this.detachFx()
       this.mode = mode
       if (!this.forceLight) this.state.warning = ''
@@ -280,33 +263,17 @@ export class Engine {
       }
       this.discard(old, RELEASE_MS)
     }
-    if (mode === 'speex' && this.fxNodes.speex) this.fxNodes.speex.port.postMessage(Math.round(cfg.speexDb))
+    if ((mode === 'speex' || mode === 'speexzero') && this.fxNodes.speex) this.fxNodes.speex.port.postMessage(Math.round(cfg.speexDb))
     if (mode === 'clearcast' && this.fxNodes.wet) {
       const k = leak(cfg.aiStrength)
       this.fxNodes.wet.gain.setTargetAtTime(1 - k, ctx.currentTime, 0.02)
       this.fxNodes.dry.gain.setTargetAtTime(k, ctx.currentTime, 0.02)
     }
     this.gain.gain.setTargetAtTime(Math.max(0, cfg.gain) / 100, ctx.currentTime, 0.02)
-    const gated = this.active === 'custom' || this.active === 'heavy'
-    const wantVoice = gated && cfg.voiceprint && cfg.speaker
-    if (wantVoice && (!this.voice || this.voice.printId !== cfg.voiceprint.id || this.voice.speaker !== cfg.speaker || this.voice.sensitivity !== cfg.voiceSensitivity)) {
-      if (this.voice) this.voice.stop()
-      this.voice = null
-      try {
-        const vad = await loadVad()
-        this.voice = new VoiceGate(ctx, this.fxOut, this.gate, cfg.voiceprint, cfg.speaker, vad, s => this.onVoiceState(s), cfg.voiceSensitivity)
-        await this.voice.start()
-      } catch (err) {
-        if (this.voice) this.voice.stop()
-        this.voice = null
-        this.gate.gain.setTargetAtTime(1, ctx.currentTime, 0.02)
-        this.state.warning = 'Voice lock could not start (' + String((err && err.message) || err) + ').'
-      }
-    } else if (!wantVoice && this.voice) {
-      this.voice.stop()
-      this.voice = null
-      this.gate.gain.setTargetAtTime(1, ctx.currentTime, 0.02)
-    }
+  }
+
+  keyFor(mode, cfg) {
+    return mode === 'personal' ? 'personal|' + (cfg.personalUrl || '') : cfg.denoiserUrl
   }
 
   async denoiser(options) {
@@ -359,7 +326,7 @@ export class Engine {
     const ctx = this.ctx
     const add = (...nodes) => this.fx.push(...nodes)
     this.active = mode
-    this.denoiserKey = mode === 'heavy' ? cfg.denoiserHeavyUrl : cfg.denoiserUrl
+    this.denoiserKey = this.keyFor(mode, cfg)
     this.state.denoiser = ''
     this.fxOut.gain.value = 1
     if (mode === 'off') {
@@ -372,8 +339,8 @@ export class Engine {
       this.fxIn.connect(node).connect(this.fxOut)
       add(node)
       this.fxNodes = { rnnoise: node }
-    } else if (mode === 'speex') {
-      const node = new AudioWorkletNode(ctx, SPEEX_ID, {
+    } else if (mode === 'speex' || mode === 'speexzero') {
+      const node = new AudioWorkletNode(ctx, mode === 'speexzero' ? 'vesper-speex-zero' : SPEEX_ID, {
         channelCount: 1,
         channelCountMode: 'explicit',
         processorOptions: { maxChannels: 1, wasmBinary: await this.wasmBinary('speex'), noiseSuppress: Math.round(cfg.speexDb) }
@@ -397,17 +364,24 @@ export class Engine {
       this.fxIn.connect(delay).connect(dry).connect(this.fxOut)
       add(node, wet, dry, delay)
       this.fxNodes = { denoise: node, wet, dry, delay }
-      if (kind === 'dpdfnet') this.startWatch()
+      if (kind === 'dpdfnet' || kind === 'personal') this.startWatch()
     }
   }
 
   async aiDenoiser(cfg) {
-    const heavy = this.active === 'heavy'
-    const url = heavy ? cfg.denoiserHeavyUrl : cfg.denoiserUrl
-    if (url && !this.forceLight) {
+    if (this.active === 'personal' && !this.forceLight) {
+      const url = cfg.personalUrl || asset('./vendor/dfn3_ll.tar.gz')
       try {
-        const model = heavy ? 'dpdfnet2_48khz_hr' : 'dpdfnet_baseline'
-        return { node: await this.denoiser({ backend: 'dpdfnet', model, modelUrl: url, provider: 'wasm' }), kind: 'dpdfnet' }
+        return { node: await this.denoiser({ backend: 'dfn3', modelUrl: url }), kind: 'personal' }
+      } catch (err) {
+        this.state.warning = 'The personal model could not start (' + String((err && err.message) || err) + '). Using the built-in light model.'
+        return { node: await this.denoiser({ backend: 'dfn3' }), kind: 'dfn3' }
+      }
+    }
+    const url = cfg.denoiserUrl
+    if (this.active === 'clearcast' && url && !this.forceLight) {
+      try {
+        return { node: await this.denoiser({ backend: 'dpdfnet', model: 'dpdfnet_baseline', modelUrl: url, provider: 'wasm' }), kind: 'dpdfnet' }
       } catch (err) {
         this.state.warning = 'The main AI model could not start (' + String((err && err.message) || err) + '). Using the built-in light model.'
       }
@@ -479,12 +453,37 @@ export class Engine {
 
   async route(cfg) {
     const monitorId = await resolveDevice('audiooutput', cfg.monitorName)
-    for (const el of [this.monitorEl, this.sbEl]) {
-      if (el.sinkId !== monitorId && el.setSinkId) await el.setSinkId(monitorId)
+    const cableId = await resolveDevice('audiooutput', cfg.cableName)
+    this.state.hasCable = Boolean(cableId)
+    const key = [Boolean(cfg.monitor), monitorId, cableId].join('|')
+    if (key !== this.sinkKey) {
+      this.sinkKey = key
+      const ctx = this.ctx
+      try {
+        this.bus.disconnect(ctx.destination)
+      } catch {}
+      try {
+        this.monitorGain.disconnect(ctx.destination)
+      } catch {}
+      if (cfg.monitor) {
+        await ctx.setSinkId(monitorId)
+        this.monitorGain.connect(ctx.destination)
+        if (cableId) {
+          if (this.cableEl.setSinkId) await this.cableEl.setSinkId(cableId)
+          await this.cableEl.play().catch(() => {})
+        } else {
+          this.cableEl.pause()
+        }
+      } else {
+        this.cableEl.pause()
+        if (cableId) {
+          await ctx.setSinkId(cableId)
+          this.bus.connect(ctx.destination)
+        }
+      }
     }
+    if (this.sbEl.sinkId !== monitorId && this.sbEl.setSinkId) await this.sbEl.setSinkId(monitorId)
     this.monitorGain.gain.value = cfg.monitor ? 1 : 0
-    if (cfg.monitor) await this.monitorEl.play().catch(() => {})
-    else this.monitorEl.pause()
     await this.sbEl.play().catch(() => {})
     this.sbBus.gain.setTargetAtTime(Math.max(0, cfg.boardVolume) / 100, this.ctx.currentTime, 0.02)
   }
@@ -545,8 +544,6 @@ export class Engine {
 
   async teardown() {
     this.stopHealth()
-    if (this.voice) this.voice.stop()
-    this.voice = null
     if (this.ctx) {
       for (const s of this.playing.values()) {
         try {
@@ -555,7 +552,7 @@ export class Engine {
       }
       this.playing.clear()
       this.teardownFx()
-      for (const el of [this.monitorEl, this.sbEl]) {
+      for (const el of [this.cableEl, this.sbEl]) {
         if (el) {
           el.pause()
           el.srcObject = null

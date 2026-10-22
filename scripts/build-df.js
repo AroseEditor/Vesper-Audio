@@ -6,6 +6,8 @@ const { execFileSync } = require('child_process')
 const COMMIT = 'd375b2d8309e0935d165700c91da9de862a99c31'
 const MODEL_URL = `https://raw.githubusercontent.com/Rikorose/DeepFilterNet/${COMMIT}/models/DeepFilterNet3_onnx.tar.gz`
 const MODEL_SHA256 = 'c94d91f70911001c946e0fabb4aa9adc37045f45a03b56008cb0c8244cb63616'
+const LL_URL = `https://raw.githubusercontent.com/Rikorose/DeepFilterNet/${COMMIT}/models/DeepFilterNet3_ll_onnx.tar.gz`
+const LL_SHA256 = '5998e58e8ba0e09bb76986ef97b84afa065a571ef282d4a1222f341e3251cf3a'
 const BINDGEN_VERSION = '0.2.92'
 
 const root = path.join(__dirname, '..')
@@ -59,18 +61,22 @@ function build() {
   fs.copyFileSync(path.join(out, 'df_bg.wasm'), path.join(vendor, 'df_bg.wasm'))
 }
 
-async function model() {
-  const dest = path.join(vendor, 'dfn3.tar.gz')
-  const res = await fetch(MODEL_URL)
+async function fetchModel(url, sha, file) {
+  const res = await fetch(url)
   if (!res.ok) throw new Error('model download failed ' + res.status)
   const bytes = Buffer.from(await res.arrayBuffer())
   const sum = crypto.createHash('sha256').update(bytes).digest('hex')
-  if (sum !== MODEL_SHA256) throw new Error('DeepFilterNet3 model checksum mismatch: ' + sum)
-  fs.writeFileSync(dest, bytes)
+  if (sum !== sha) throw new Error(file + ' checksum mismatch: ' + sum)
+  fs.writeFileSync(path.join(vendor, file), bytes)
+}
+
+async function model() {
+  await fetchModel(MODEL_URL, MODEL_SHA256, 'dfn3.tar.gz')
+  await fetchModel(LL_URL, LL_SHA256, 'dfn3_ll.tar.gz')
 }
 
 async function main() {
-  const done = ['df.js', 'df_bg.wasm', 'dfn3.tar.gz'].every(f => fs.existsSync(path.join(vendor, f)))
+  const done = ['df.js', 'df_bg.wasm', 'dfn3.tar.gz', 'dfn3_ll.tar.gz'].every(f => fs.existsSync(path.join(vendor, f)))
   if (done && !force) return
   ensureTools()
   checkout()

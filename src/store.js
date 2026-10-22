@@ -10,18 +10,16 @@ const defaults = {
   monitorId: '',
   monitor: false,
   ai: false,
-  aiPreset: 'custom',
-  aiStrength: 80,
+  aiPreset: 'personal',
+  aiStrength: 100,
   basic: false,
   basicPreset: 'rnnoise',
   speexDb: -30,
-  voiceSensitivity: 'balanced',
   cableOwned: false,
   gains: {},
   boardVolume: 100,
   sounds: [],
-  voiceSamples: [],
-  voiceprints: {},
+  personal: null,
   driverVersion: null,
   setupDone: false
 }
@@ -34,6 +32,8 @@ function load() {
   file = path.join(app.getPath('userData'), 'settings.json')
   try {
     data = { ...defaults, ...JSON.parse(fs.readFileSync(file, 'utf8')) }
+    if (data.aiPreset !== 'clearcast') data.aiPreset = 'personal'
+    for (const k of ['voiceSensitivity', 'voiceSamples', 'voiceprints']) delete data[k]
   } catch {
     data = { ...defaults }
   }

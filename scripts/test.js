@@ -56,7 +56,8 @@ async function modes(page) {
   const list = [
     ['rnnoise', { ai: false, basic: true, basicPreset: 'rnnoise' }, 10],
     ['speex', { ai: false, basic: true, basicPreset: 'speex', speexDb: -40 }, 8],
-    ['custom', { ai: true, aiPreset: 'custom', basic: false }, 10],
+    ['speexzero', { ai: false, basic: true, basicPreset: 'speexzero', speexDb: -40 }, 6],
+    ['personal', { ai: true, aiPreset: 'personal', basic: false }, 10],
     ['clearcast', { ai: true, aiPreset: 'clearcast', aiStrength: 100, basic: false }, 10]
   ]
   for (const [name, patch, need] of list) {
@@ -121,14 +122,13 @@ async function main() {
   })
   check('closing hides to tray', hidden)
   check('engine survives hidden window', await page.evaluate(() => window.__vesper.engine.state.running))
-  const vad = await page.evaluate(async () => {
-    const v = await window.__vesper.loadVad()
-    const burst = new Float32Array(16000 * 2).map((_, i) => (Math.random() - 0.5) * 0.4 * Math.sin((i / 16000) * Math.PI))
-    const probs = await v.push(burst)
-    v.dispose()
-    return { frames: probs.length, peak: Math.max(...probs) }
+  const personal = await page.evaluate(async () => {
+    const v = window.__vesper
+    await v.save({ ai: true, aiPreset: 'personal', basic: false })
+    await v.sync()
+    return { active: v.engine.active, denoiser: v.engine.state.denoiser, warning: v.engine.state.warning }
   })
-  check('speech detector loads and ignores a noise burst', vad.frames >= 60 && vad.peak < 0.5, JSON.stringify(vad))
+  check('personal model starts with the built-in zero lookahead model', personal.active === 'personal' && personal.denoiser === 'personal' && !personal.warning, JSON.stringify(personal))
   check('no page errors', errors.length === 0, errors.join(' | '))
   await page.evaluate(() => window.__vesper.save({ closeToTray: false }))
   await new Promise(res => setTimeout(res, 400))

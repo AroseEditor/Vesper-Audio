@@ -17,9 +17,16 @@ const invokes = new Set([
   'driver:uninstall',
   'sounds:add',
   'sounds:remove',
-  'voice:save',
-  'voice:load',
-  'voice:clear',
+  'voice:wav',
+  'voice:list',
+  'voice:wipe',
+  'diag:save',
+  'diag:open',
+  'trainer:status',
+  'trainer:start',
+  'trainer:cancel',
+  'trainer:use',
+  'trainer:remove',
   'app:relaunch',
   'app:settings',
   'system:restart',
@@ -30,7 +37,7 @@ const invokes = new Set([
   'app:log'
 ])
 
-const events = new Set(['driver:progress', 'model:progress', 'app:shown', 'update:status', 'app:wake'])
+const events = new Set(['driver:progress', 'model:progress', 'app:shown', 'update:status', 'app:wake', 'trainer:progress'])
 
 contextBridge.exposeInMainWorld('vesper', {
   invoke: (channel, ...args) =>

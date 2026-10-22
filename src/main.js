@@ -10,6 +10,8 @@ const winaudio = require('./winaudio')
 const driver = require('./driver')
 const models = require('./models')
 const updater = require('./updater')
+const trainer = require('./trainer')
+const { wavBuffer } = require('./wav')
 
 const REPO_URL = 'https://github.com/AroseEditor/Vesper-Audio'
 const MAX_SOUNDS = 40
@@ -21,8 +23,7 @@ protocol.registerSchemesAsPrivileged([
 
 if (testMode && process.env.VESPER_USER_DATA) app.setPath('userData', process.env.VESPER_USER_DATA)
 if (!app.requestSingleInstanceLock() && !testMode) app.quit()
-const early = store.load()
-if (early.ai && early.aiPreset === 'heavy') app.commandLine.appendSwitch('force_high_performance_gpu')
+store.load()
 app.commandLine.appendSwitch('disable-renderer-backgrounding')
 app.commandLine.appendSwitch('disable-background-timer-throttling')
 app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
@@ -43,8 +44,6 @@ let quitting = false
 const assets = path.join(__dirname, 'ui', 'assets')
 const icon = nativeImage.createFromPath(path.join(assets, 'icon.png'))
 const soundsDir = () => path.join(app.getPath('userData'), 'sounds')
-const voiceDir = () => path.join(app.getPath('userData'), 'voice')
-const MAX_VOICE_SAMPLES = 4
 
 function showWindow() {
   if (!win) return
@@ -164,23 +163,25 @@ function handleIpc() {
     fs.rmSync(path.join(soundsDir(), path.basename(id) + '.mp3'), { force: true })
     return store.set({ sounds: store.get().sounds.filter(s => s.id !== id) }).sounds
   })
-  ipcMain.handle('voice:save', (_, bytes, meta) => {
-    fs.mkdirSync(voiceDir(), { recursive: true })
-    const keep = meta.replace ? [] : store.get().voiceSamples.slice(-(MAX_VOICE_SAMPLES - 1))
-    if (meta.replace) for (const old of store.get().voiceSamples) fs.rmSync(path.join(voiceDir(), old.id + '.pcm'), { force: true })
-    const id = crypto.randomUUID()
-    fs.writeFileSync(path.join(voiceDir(), id + '.pcm'), Buffer.from(bytes))
-    const samples = [...keep, { id, language: meta.language, seconds: meta.seconds, created: Date.now() }]
-    for (const old of store.get().voiceSamples) if (!samples.some(k => k.id === old.id)) fs.rmSync(path.join(voiceDir(), old.id + '.pcm'), { force: true })
-    return store.set({ voiceSamples: samples, voiceprints: {} }).voiceSamples
+  ipcMain.handle('trainer:status', () => trainer.status())
+  ipcMain.handle('trainer:start', (_, options) => {
+    trainer.start(options, s => win && !win.isDestroyed() && win.webContents.send('trainer:progress', s))
+    return trainer.status()
   })
-  ipcMain.handle('voice:load', () =>
-    store.get().voiceSamples.map(s => ({ id: s.id, bytes: fs.readFileSync(path.join(voiceDir(), s.id + '.pcm')) }))
-  )
-  ipcMain.handle('voice:clear', () => {
-    for (const old of store.get().voiceSamples) fs.rmSync(path.join(voiceDir(), old.id + '.pcm'), { force: true })
-    return store.set({ voiceSamples: [], voiceprints: {} }).voiceSamples
+  ipcMain.handle('trainer:cancel', () => trainer.cancel())
+  ipcMain.handle('trainer:use', () => trainer.useCandidate())
+  ipcMain.handle('trainer:remove', () => trainer.remove())
+  ipcMain.handle('voice:wav', (_, meta, bytes) => trainer.saveWav(meta, bytes))
+  ipcMain.handle('voice:list', () => trainer.listVoice())
+  ipcMain.handle('voice:wipe', () => trainer.wipeVoice())
+  ipcMain.handle('diag:save', (_, name, bytes) => {
+    const dir = path.join(app.getPath('documents'), 'Vesper Audio Diagnostics')
+    fs.mkdirSync(dir, { recursive: true })
+    const file = path.join(dir, String(name).replace(/[^a-z0-9._-]/gi, '_'))
+    fs.writeFileSync(file, file.endsWith('.json') ? Buffer.from(bytes) : wavBuffer(Buffer.from(bytes)))
+    return file
   })
+  ipcMain.handle('diag:open', () => shell.openPath(path.join(app.getPath('documents'), 'Vesper Audio Diagnostics')))
   ipcMain.handle('app:relaunch', () => {
     store.flush()
     quitting = true

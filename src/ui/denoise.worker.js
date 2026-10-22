@@ -8,10 +8,10 @@ async function bytesOf(url) {
   return new Uint8Array(await res.arrayBuffer())
 }
 
-async function createDfn3() {
+async function createDfn3(msg) {
   const mod = await import('./vendor/df.js')
   await mod.default(vendor('df_bg.wasm'))
-  const state = mod.df_create(await bytesOf(vendor('dfn3.tar.gz')), 100)
+  const state = mod.df_create(await bytesOf(msg.modelUrl || vendor('dfn3.tar.gz')), 100)
   return {
     hop: mod.df_get_frame_length(state),
     process: async frame => mod.df_process_frame(state, frame)
@@ -31,7 +31,7 @@ self.onmessage = async e => {
   const msg = e.data
   if (msg.type !== 'init') return
   try {
-    const engine = msg.backend === 'dfn3' ? await createDfn3() : await createDpdf(msg)
+    const engine = msg.backend === 'dfn3' ? await createDfn3(msg) : await createDpdf(msg)
     let queue = Promise.resolve()
     let backlog = 0
     msg.port.onmessage = ev => {

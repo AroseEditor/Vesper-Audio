@@ -132,13 +132,10 @@
         <h1>Settings</h1>
         <div class="card row"><span class="title">Auto Open App &amp; Initialize Drivers on start:</span><label class="check solo"><input type="checkbox" id="set-autostart"><span class="box"><span data-icon="check" data-size="16"></span></span></label></div>
         <div class="card row"><span class="title">Close App to System Tray on Closing:</span><label class="check solo"><input type="checkbox" id="set-tray"><span class="box"><span data-icon="check" data-size="16"></span></span></label></div>
+        <div class="card row"><span class="title">Audio problems? Save a 30 second diagnostic recording</span><button class="btn" id="set-diag" type="button">Record diagnostic</button></div>
         <div class="card row"><span class="title" id="update-text">Updates</span><span class="btn-group"><button class="btn" id="set-update" type="button">Check for updates</button></span></div>
         <div class="card row"><span class="title">Re-Download Audio Drivers and Setup them?</span><span class="btn-group"><button class="btn" id="set-driver" type="button">Click to Re-init and Setup</button><button class="btn" id="set-own" type="button">Fallback driver</button><button class="btn" id="set-uninstall" type="button">Uninstall</button></span></div>
-        <div class="card row"><span class="title">Re-Do Custom Paragraph for Custom AI Noise Cancellation?</span><button class="btn" id="set-voice" type="button">Click to Re-do</button></div>
-        <div class="card row">
-          <span class="title">Voice lock strictness</span>
-          <div class="select" data-select="sensitivity"><button class="select-btn" type="button"><span class="select-text" id="sens-text">Balanced</span><span data-icon="chevron" data-size="18"></span></button><div class="menu" hidden></div></div>
-        </div>
+        <div class="card row"><span class="title" id="set-voice-text">Personal voice model</span><span class="btn-group"><button class="btn" id="set-voice" type="button">Train my voice</button><button class="btn" id="set-voice-remove" type="button" hidden>Delete</button></span></div>
         <div class="card row">
           <span class="title">Virtual mic output</span>
           <div class="select" data-select="cable"><button class="select-btn" type="button"><span class="select-text" id="cable-text">Auto</span><span data-icon="chevron" data-size="18"></span></button><div class="menu" hidden></div></div>
