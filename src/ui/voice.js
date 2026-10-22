@@ -128,6 +128,49 @@ export function cosine(a, b) {
   return s
 }
 
+export async function loadVad() {
+  const worker = new Worker(new URL('./vad.worker.js', import.meta.url), { type: 'module' })
+  const pending = new Map()
+  let seq = 0
+  const ready = new Promise((resolve, reject) => {
+    worker.onmessage = e => {
+      const m = e.data
+      if (m.type === 'ready') resolve()
+      else if (m.type === 'error') reject(new Error(m.message))
+      else if (m.type === 'probs') {
+        const p = pending.get(m.id)
+        pending.delete(m.id)
+        if (m.error) p.reject(new Error(m.error))
+        else p.resolve(m.probs)
+      }
+    }
+    worker.onerror = e => reject(new Error(e.message || 'voice activity worker failed'))
+  })
+  worker.postMessage({ type: 'init', url: new URL('./assets/silero_vad.onnx', import.meta.url).href })
+  try {
+    await ready
+  } catch (err) {
+    worker.terminate()
+    throw err
+  }
+  return {
+    push(samples) {
+      return new Promise((resolve, reject) => {
+        const id = ++seq
+        pending.set(id, { resolve, reject })
+        const copy = Float32Array.from(samples)
+        worker.postMessage({ type: 'push', id, samples: copy }, [copy.buffer])
+      })
+    },
+    reset() {
+      worker.postMessage({ type: 'reset' })
+    },
+    dispose() {
+      worker.terminate()
+    }
+  }
+}
+
 export async function loadSpeaker(url, provider = 'wasm') {
   const worker = new Worker(new URL('./speaker.worker.js', import.meta.url), { type: 'module' })
   const pending = new Map()
@@ -302,16 +345,24 @@ export async function buildPrint(speaker, segments, onProgress = () => {}, cap =
 }
 
 export class Enroller {
-  constructor(ctx, source, onProgress) {
+  constructor(ctx, source, onProgress, vad) {
     this.speech = []
     this.seconds = 0
     this.hang = 0
     this.onProgress = onProgress
-    this.tap = createTap(ctx, source, chunk => this.push(chunk))
+    this.vad = vad
+    this.mode = 'speech'
+    this.chain = Promise.resolve()
+    this.tap = createTap(ctx, source, chunk => {
+      this.chain = this.chain.then(() => this.push(chunk)).catch(() => {})
+    })
   }
 
-  push(chunk) {
-    if (rms(chunk) > VAD_RMS) {
+  async push(chunk) {
+    const probs = await this.vad.push(chunk)
+    const voiced = probs.length > 0 && probs.reduce((a, b) => a + b, 0) / probs.length >= 0.5
+    const hit = this.mode === 'laugh' ? rms(chunk) > VAD_RMS : voiced
+    if (hit) {
       this.hang = 3
       this.speech.push(chunk)
       this.seconds += CHUNK_SECONDS
@@ -322,42 +373,64 @@ export class Enroller {
     }
   }
 
-  stop() {
+  async stop() {
     this.tap.stop()
+    await this.chain
+    this.vad.dispose()
     return concat(this.speech)
   }
 }
 
 export class VoiceGate {
-  constructor(ctx, source, gate, voiceprint, speaker, onState, sensitivity = 'balanced') {
+  constructor(ctx, source, gate, voiceprint, speaker, vad, onState, sensitivity = 'balanced') {
     this.ctx = ctx
     this.source = source
     this.gate = gate
     this.printId = voiceprint.id
     this.speaker = speaker
+    this.vad = vad
     this.sensitivity = sensitivity
-    this.logic = new GateLogic({ centroids: voiceprint.centroids, thr: voiceprint.thr, speaker, sensitivity, onState })
-    this.open = false
+    this.logic = new GateLogic({ centroids: voiceprint.centroids, thr: voiceprint.thr, speaker, vad, sensitivity, onState })
+    this.open = null
+    this.lastPushAt = 0
   }
 
   async start() {
     this.gate.gain.value = 0
+    this.delay = this.ctx.createDelay(2)
+    this.delay.delayTime.value = this.logic.lookahead
+    this.source.disconnect(this.gate)
+    this.source.connect(this.delay)
+    this.delay.connect(this.gate)
     this.tap = createTap(this.ctx, this.source, chunk => {
+      this.lastPushAt = performance.now()
       this.logic.push(chunk)
-      this.apply()
     })
+    this.timer = setInterval(() => this.apply(), 20)
   }
 
   apply() {
-    const open = this.logic.open
+    if (!this.lastPushAt) return
+    const now = this.logic.t + (performance.now() - this.lastPushAt) / 1000
+    const open = this.logic.openAt(now - this.logic.lookahead)
     if (open === this.open) return
     this.open = open
-    this.gate.gain.setTargetAtTime(open ? 1 : 0, this.ctx.currentTime, open ? 0.01 : 0.05)
+    this.gate.gain.setTargetAtTime(open ? 1 : 0, this.ctx.currentTime, open ? 0.008 : 0.04)
   }
 
   stop() {
+    clearInterval(this.timer)
     this.logic.stop()
     if (this.tap) this.tap.stop()
     this.tap = null
+    if (this.delay) {
+      try {
+        this.delay.disconnect()
+        this.source.disconnect(this.delay)
+        this.source.connect(this.gate)
+      } catch {}
+      this.delay = null
+    }
+    this.vad.dispose()
   }
 }
