@@ -121,13 +121,16 @@ export class Engine {
       }
     })
     const ctx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' })
-    await Promise.all(['./limit.worklet.js', './record.worklet.js', './denoise.worklet.js', './vendor/rnnoise.worklet.js', './vendor/speex.worklet.js'].map(f => ctx.audioWorklet.addModule(asset(f))))
+    await Promise.all(['./limit.worklet.js', './dynamics.worklet.js', './record.worklet.js', './denoise.worklet.js', './vendor/rnnoise.worklet.js', './vendor/speex.worklet.js'].map(f => ctx.audioWorklet.addModule(asset(f))))
     this.stream = stream
     this.ctx = ctx
     this.src = ctx.createMediaStreamSource(stream)
     this.gain = ctx.createGain()
     this.fxIn = ctx.createGain()
     this.fxOut = ctx.createGain()
+    this.dyn = new AudioWorkletNode(ctx, 'vesper-dyn', { channelCount: 1, channelCountMode: 'explicit' })
+    this.dyn.port.onmessage = e => (this.dynOpen = e.data.open)
+    this.dynOpen = true
     this.limiter = new AudioWorkletNode(ctx, 'vesper-limit', { channelCount: 1, channelCountMode: 'explicit' })
     this.micOut = ctx.createGain()
     this.monitorGain = ctx.createGain()
@@ -144,7 +147,8 @@ export class Engine {
     this.src.connect(this.gain)
     this.gain.connect(this.fxIn)
     this.gain.connect(this.analyser)
-    this.fxOut.connect(this.limiter)
+    this.fxOut.connect(this.dyn)
+    this.dyn.connect(this.limiter)
     this.fxOut.connect(this.fxAnalyser)
     this.limiter.connect(this.micOut)
     this.micOut.connect(this.bus)
@@ -270,6 +274,7 @@ export class Engine {
       this.fxNodes.dry.gain.setTargetAtTime(k, ctx.currentTime, 0.02)
     }
     this.gain.gain.setTargetAtTime(Math.max(0, cfg.gain) / 100, ctx.currentTime, 0.02)
+    this.dyn.port.postMessage({ gateOn: Boolean(cfg.gateOn), gateDb: cfg.gateDb, normOn: Boolean(cfg.normOn), quietDb: cfg.quietDb, loudDb: cfg.loudDb })
   }
 
   keyFor(mode, cfg) {

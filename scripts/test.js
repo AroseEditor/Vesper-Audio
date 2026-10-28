@@ -81,6 +81,113 @@ async function modes(page) {
   }
 }
 
+async function dynamics(page) {
+  const ui = await page.evaluate(async () => {
+    const set = (id, value) => {
+      const el = document.getElementById(id)
+      el.value = value
+      el.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+    document.getElementById('gate-on').click()
+    document.getElementById('norm-on').click()
+    set('gate-db', -33)
+    set('quiet-db', 7)
+    set('loud-db', -12)
+    await new Promise(res => setTimeout(res, 500))
+    const s = await window.__vesper.api.invoke('settings:get')
+    const text = id => document.getElementById(id).textContent
+    return {
+      saved: [s.gateOn, s.gateDb, s.normOn, s.quietDb, s.loudDb],
+      shown: [!document.getElementById('gate-sub').hidden, !document.getElementById('norm-sub').hidden],
+      labels: [text('gate-db-out'), text('quiet-db-out'), text('loud-db-out')]
+    }
+  })
+  check('gate and loudness controls save to settings', JSON.stringify(ui.saved) === JSON.stringify([true, -33, true, 7, -12]), JSON.stringify(ui.saved))
+  check('gate and loudness sliders appear when ticked and show dB', ui.shown.every(Boolean) && ui.labels.join() === '-33 dB,+7 dB,-12 dB', ui.labels.join())
+
+  const gate = async db => {
+    return page.evaluate(async db => {
+      const v = window.__vesper
+      await v.save({ ai: false, basic: false, gateOn: true, gateDb: db, normOn: false })
+      await v.sync()
+      await new Promise(res => setTimeout(res, 2500))
+      let input = 0
+      let output = 0
+      const n = 40
+      for (let i = 0; i < n; i++) {
+        input += v.engine.level() * 60 - 60
+        output += v.engine.outLevel() * 60 - 60
+        await new Promise(res => setTimeout(res, 50))
+      }
+      return { input: input / n, output: output / n, open: v.engine.dynOpen }
+    }, db)
+  }
+  const closed = await gate(-10)
+  check('noise gate silences a signal below the threshold', !closed.open && closed.input - closed.output >= 25, `in ${closed.input.toFixed(1)} out ${closed.output.toFixed(1)}`)
+  const passing = await gate(-80)
+  check('noise gate stays open for a signal above the threshold', passing.open && Math.abs(passing.input - passing.output) <= 1.5, `in ${passing.input.toFixed(1)} out ${passing.output.toFixed(1)}`)
+
+  const shape = async (segments, patch, span) => {
+    return page.evaluate(
+      async ({ segments, patch, span }) => {
+        const v = window.__vesper
+        const e = v.engine
+        await v.save({ ai: false, basic: false, gateOn: false, normOn: false })
+        await v.sync()
+        await new Promise(res => setTimeout(res, 300))
+        await v.save({ normOn: true, ...patch })
+        await v.sync()
+        await new Promise(res => setTimeout(res, 1500))
+        e.gain.gain.cancelScheduledValues(0)
+        e.gain.gain.value = 0
+        const sp = e.ctx.createScriptProcessor(1024, 1, 1)
+        const mute = e.ctx.createGain()
+        mute.gain.value = 0
+        const chunks = []
+        e.micOut.connect(sp)
+        sp.connect(mute).connect(e.ctx.destination)
+        sp.onaudioprocess = ev => chunks.push(ev.inputBuffer.getChannelData(0).slice())
+        const total = segments.reduce((n, seg) => n + seg[0], 0)
+        const buf = e.ctx.createBuffer(1, Math.round(total * 48000), 48000)
+        const data = buf.getChannelData(0)
+        let at = 0
+        for (const [seconds, amp] of segments) {
+          const end = at + Math.round(seconds * 48000)
+          for (let i = at; i < end; i++) data[i] = Math.sin((2 * Math.PI * 300 * i) / 48000) * amp
+          at = end
+        }
+        const src = e.ctx.createBufferSource()
+        src.buffer = buf
+        src.connect(e.fxIn)
+        src.start()
+        await new Promise(res => setTimeout(res, (total + 0.6) * 1000))
+        sp.onaudioprocess = null
+        e.micOut.disconnect(sp)
+        const flat = new Float32Array(chunks.reduce((n, c) => n + c.length, 0))
+        let o = 0
+        for (const c of chunks) {
+          flat.set(c, o)
+          o += c.length
+        }
+        let start = 0
+        while (start < flat.length && Math.abs(flat[start]) < 1e-4) start++
+        const from = start + Math.round(span[0] * 48000)
+        const to = start + Math.round(span[1] * 48000)
+        let sum = 0
+        for (let i = from; i < to; i++) sum += flat[i] * flat[i]
+        return 10 * Math.log10(sum / (to - from) + 1e-12)
+      },
+      { segments, patch, span }
+    )
+  }
+  const rms = amp => 20 * Math.log10(amp / Math.SQRT2)
+  const lifted = (await shape([[8, 0.5], [2, 0.0316]], { quietDb: 10, loudDb: 0 }, [8.8, 9.8])) - rms(0.0316)
+  check('loudness normalization lifts quiet speech by the quiet slider', Math.abs(lifted - 10) <= 1.5, `${lifted.toFixed(1)} dB`)
+  const cut = (await shape([[3, 0.063], [0.8, 0.5]], { quietDb: 0, loudDb: -6 }, [3.12, 3.45])) - rms(0.5)
+  check('loudness normalization lowers loud speech by the loud slider', Math.abs(cut + 6) <= 1.5, `${cut.toFixed(1)} dB`)
+  await page.evaluate(() => window.__vesper.save({ gateOn: false, normOn: false }))
+}
+
 async function main() {
   const noiseWav = path.join(work, 'noise.wav')
   writeWav(noiseWav, noise(12, 0.08), 48000)
@@ -98,6 +205,7 @@ async function main() {
   check('windows endpoints detected', devices.length > 0, devices.length + ' endpoints')
 
   await modes(page)
+  await dynamics(page)
 
   await page.evaluate(() => window.__vesper.save({ ai: false, basic: false, closeToTray: true, boardVolume: 42, speexDb: -31, aiStrength: 55, basicPreset: 'speex' }))
   const sounds = await page.evaluate(() => window.__vesper.api.invoke('sounds:add'))

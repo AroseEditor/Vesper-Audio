@@ -10,6 +10,7 @@ let personal = null
 let diag = null
 
 const PRESET_LABEL = { personal: 'Personal', clearcast: 'ClearCast' }
+const GATE_HINT = 'Silences your microphone while you are quieter than the threshold.'
 const BASIC_LABEL = { speex: 'Speex', speexzero: 'Speex zero latency', rnnoise: 'RNNoise' }
 
 const state = {
@@ -63,6 +64,11 @@ function engineConfig() {
     basic: s.basic,
     basicPreset: s.basicPreset,
     speexDb: s.speexDb,
+    gateOn: s.gateOn,
+    gateDb: s.gateDb,
+    normOn: s.normOn,
+    quietDb: s.quietDb,
+    loudDb: s.loudDb,
     monitor: s.monitor,
     boardVolume: s.boardVolume,
     personalUrl: personal ? personal.url() : '',
@@ -117,6 +123,10 @@ function notice(key, value) {
       h('div', { class: 'banner' }, h('span', { class: 'msg', text: n.text }), n.action ? h('button', { class: 'btn small', type: 'button', onclick: n.action, text: n.label }) : null)
     )
   )
+}
+
+function signed(db) {
+  return (db > 0 ? '+' : '') + db + ' dB'
 }
 
 function fill(el) {
@@ -257,6 +267,18 @@ function renderHome() {
   $('speex-db').value = s.speexDb
   $('speex-db-out').textContent = s.speexDb + ' dB'
   fill($('speex-db'))
+  $('gate-on').checked = s.gateOn
+  $('gate-sub').hidden = !s.gateOn
+  $('gate-db').value = s.gateDb
+  $('gate-db-out').textContent = signed(s.gateDb)
+  fill($('gate-db'))
+  $('norm-on').checked = s.normOn
+  $('norm-sub').hidden = !s.normOn
+  for (const [id, value] of [['quiet-db', s.quietDb], ['loud-db', s.loudDb]]) {
+    $(id).value = value
+    $(id + '-out').textContent = signed(value)
+    fill($(id))
+  }
 }
 
 function renderProps() {
@@ -757,6 +779,24 @@ function bindControls() {
     await save({ speexDb: Number(e.target.value) })
     sync()
   })
+  $('gate-on').addEventListener('change', async e => {
+    await save({ gateOn: e.target.checked })
+    renderHome()
+    sync()
+  })
+  $('norm-on').addEventListener('change', async e => {
+    await save({ normOn: e.target.checked })
+    renderHome()
+    sync()
+  })
+  for (const [id, key] of [['gate-db', 'gateDb'], ['quiet-db', 'quietDb'], ['loud-db', 'loudDb']]) {
+    $(id).addEventListener('input', async e => {
+      fill(e.target)
+      $(id + '-out').textContent = signed(Number(e.target.value))
+      await save({ [key]: Number(e.target.value) })
+      sync()
+    })
+  }
   $('voice-enroll').addEventListener('click', () => personal.open())
 
   let levelTimer = null
@@ -822,6 +862,8 @@ function bindControls() {
 function meters() {
   $('meter-home').style.width = Math.round(engine.outLevel() * 100) + '%'
   $('meter-props').style.width = Math.round(engine.level() * 100) + '%'
+  const gate = state.settings && state.settings.gateOn ? (engine.dynOpen ? 'Gate open' : 'Gate closed') : GATE_HINT
+  if ($('gate-state').textContent !== gate) $('gate-state').textContent = gate
   requestAnimationFrame(meters)
 }
 

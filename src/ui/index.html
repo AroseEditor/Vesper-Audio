@@ -80,6 +80,28 @@
           </div>
           <div class="meter" aria-hidden="true"><i id="meter-home"></i></div>
         </div>
+
+        <div class="card" id="gate-card">
+          <div class="row">
+            <label class="check"><input type="checkbox" id="gate-on"><span class="box"><span data-icon="check" data-size="16"></span></span><span class="title">Noise Gate</span></label>
+            <span class="muted" id="gate-state">Silences your microphone while you are quieter than the threshold.</span>
+          </div>
+          <div class="sub" id="gate-sub" hidden>
+            <div class="slider-row"><span class="muted">Threshold</span><input type="range" id="gate-db" min="-80" max="-10" step="1"><output id="gate-db-out">-45 dB</output></div>
+          </div>
+        </div>
+
+        <div class="card" id="norm-card">
+          <div class="row">
+            <label class="check"><input type="checkbox" id="norm-on"><span class="box"><span data-icon="check" data-size="16"></span></span><span class="title">Loudness Normalization</span></label>
+            <span class="muted">Makes quiet speech a little louder and loud speech a little quieter.</span>
+          </div>
+          <div class="sub" id="norm-sub" hidden>
+            <div class="slider-row"><span class="muted">Quiet sounds</span><input type="range" id="quiet-db" min="-60" max="10" step="1"><output id="quiet-db-out">+4 dB</output></div>
+            <div class="slider-row"><span class="muted">Loud sounds</span><input type="range" id="loud-db" min="-60" max="10" step="1"><output id="loud-db-out">-4 dB</output></div>
+            <p class="hint">Quiet sounds are well below your usual speaking level and loud sounds are well above it. The slider is the change in dB: -60 silences them, positive values make them louder.</p>
+          </div>
+        </div>
       </section>
 
       <section class="page" id="page-properties">
