@@ -29,27 +29,42 @@ mic -> gain -> noise cancelling -> limiter -> Vesper Audio Cable -> Discord / OB
 
 ## Contents
 
-1. [What's new in 1.2.0](#whats-new-in-120)
-2. [What it is](#what-it-is)
-3. [Screens](#screens)
-4. [Install and updates](#install-and-updates)
-5. [Quick start](#quick-start)
-6. [Features](#features)
-7. [Noise cancellation modes](#noise-cancellation-modes)
-8. [Train your voice model](#train-your-voice-model)
-9. [Latency](#latency)
-10. [Reliable audio and diagnostics](#reliable-audio-and-diagnostics)
-11. [Vesper Audio Cable](#vesper-audio-cable)
-12. [Real Windows properties](#real-windows-properties)
-13. [Benchmarks](#benchmarks)
-14. [Architecture](#architecture)
-15. [Build from source](#build-from-source)
-16. [CI and releases](#ci-and-releases)
-17. [Data and privacy](#data-and-privacy)
-18. [Troubleshooting](#troubleshooting)
-19. [Honest limits](#honest-limits)
-20. [Repository layout](#repository-layout)
-21. [Licenses and credits](#licenses-and-credits)
+1. [What's new in 1.3.0](#whats-new-in-130)
+2. [What's new in 1.2.0](#whats-new-in-120)
+3. [What it is](#what-it-is)
+4. [Screens](#screens)
+5. [Install and updates](#install-and-updates)
+6. [Quick start](#quick-start)
+7. [Features](#features)
+8. [Noise cancellation modes](#noise-cancellation-modes)
+9. [Noise gate and loudness normalization](#noise-gate-and-loudness-normalization)
+10. [Train your voice model](#train-your-voice-model)
+11. [Latency](#latency)
+12. [Reliable audio and diagnostics](#reliable-audio-and-diagnostics)
+13. [Vesper Audio Cable](#vesper-audio-cable)
+14. [Real Windows properties](#real-windows-properties)
+15. [Benchmarks](#benchmarks)
+16. [Architecture](#architecture)
+17. [Build from source](#build-from-source)
+18. [CI and releases](#ci-and-releases)
+19. [Data and privacy](#data-and-privacy)
+20. [Troubleshooting](#troubleshooting)
+21. [Honest limits](#honest-limits)
+22. [Repository layout](#repository-layout)
+23. [Licenses and credits](#licenses-and-credits)
+
+---
+
+## What's new in 1.3.0
+
+Two new cards on **Home**, below Test and Hear Yourself. Both work with every noise cancelling mode, add no delay, and are off by default.
+
+| Control | What it does |
+| --- | --- |
+| **Noise Gate** | Silences your microphone while you are quieter than a threshold you set (-80 to -10 dB). It opens at the threshold and closes 6 dB below it, holds for 150 ms, and shows whether it is open or closed live. |
+| **Loudness Normalization** | Two sliders, **Quiet sounds** and **Loud sounds**, each from -60 to +10 dB. Sounds well below your usual speaking level get the quiet change, sounds well above it get the loud change. Defaults are +4 and -4 dB. -60 silences that kind of sound, positive values make it louder. |
+
+Details, measurements and limits are in [Noise gate and loudness normalization](#noise-gate-and-loudness-normalization).
 
 ---
 
@@ -87,7 +102,7 @@ Updating from 1.1.0 keeps your settings and sounds. Custom and Heavy become Pers
 
 <table>
   <tr>
-    <td><img src="docs/home.png" alt="Home"><br><sub>Home: device, AI noise cancellation, basic noise cancellation, hear yourself</sub></td>
+    <td><img src="docs/home.png" alt="Home"><br><sub>Home: device, AI noise cancellation, basic noise cancellation, hear yourself, noise gate, loudness normalization</sub></td>
     <td><img src="docs/presets.png" alt="Presets"><br><sub>Presets with their measured delay</sub></td>
   </tr>
   <tr>
@@ -150,6 +165,8 @@ Closing the window sends the app to the tray. Left click the tray icon to open i
 | Custom Audio Gain | 0 to 400 percent software gain per microphone, saved per device. |
 | AI Noise Cancellation | Presets **Personal** and **ClearCast**. |
 | Basic Noise Cancellation | **Speex** (low CPU usage, low quality), **Speex zero latency** (0 ms) and **RNNoise** (good quality, more CPU usage). Speex and RNNoise follow OBS Studio's `noise-suppress-filter.c`: 10 ms frames (480 samples at 48 kHz), Speex through `speex_preprocess_state_init` with `SPEEX_PREPROCESS_SET_NOISE_SUPPRESS` set to the slider dB (-60 strongest to 0, default -30), RNNoise on 480-sample frames scaled by 32768, no makeup gain. Cannot be ticked while AI is on. |
+| Noise Gate | Threshold from -80 to -10 dB with a live open or closed indicator. |
+| Loudness Normalization | Separate Quiet sounds and Loud sounds sliders, -60 to +10 dB each. |
 | Train my voice | English and Hindi tick boxes, guided recording, background training, automatic validation. |
 | Test and Hear Yourself | Plays the processed microphone to your chosen output for as long as it is ticked. |
 | Soundboard | Local MP3 files, maximum 40. Played through the virtual microphone and your headphones, mixed with your voice. |
@@ -170,6 +187,48 @@ Closing the window sends the app to the tray. Left click the tray icon to open i
 | **RNNoise** (Basic) | OBS-identical RNNoise. | 21 to 26 ms | |
 
 Fallback: if the personal or ClearCast model cannot start, or the CPU cannot keep up for a sustained period, the app switches to the built-in DeepFilterNet3 without a gap in the audio and says so.
+
+---
+
+## Noise gate and loudness normalization
+
+Both run in one small AudioWorklet (`src/ui/dynamics.worklet.js`) after the noise cancelling stage and before the limiter, so they act on the cleaned voice. They have no lookahead and no buffer, so they add no delay: with both off the audio is copied straight through, and in an offline render the output lines up with the input sample for sample.
+
+### Noise gate
+
+| Setting | Value |
+| --- | --- |
+| Threshold | -80 to -10 dB, default -45 dB. The level is a fast follower (2 ms attack, 25 ms release). |
+| Open and close | Opens when the level passes the threshold, closes when it falls 6 dB below it. |
+| Hold | 150 ms, so the gate does not chatter between words. |
+| Fade | 2 ms open, 80 ms close. Closed means silence. |
+
+### Loudness normalization
+
+The reference is your usual speaking level, learned while you talk. It locks on in the first 2 seconds of speech and then follows you slowly (20 seconds), ignoring pauses and background noise, so a quiet passage stays "quiet" long enough to be lifted. The level is measured with a slower follower than the gate (5 ms attack, 120 ms release), so it responds to words and phrases, not single syllables.
+
+| Zone | Where it starts | Full effect | Applied change |
+| --- | --- | --- | --- |
+| Loud sounds | 2 dB above your usual level | 8 dB above | the Loud sounds slider, smoothly, taken in 10 ms |
+| Quiet sounds | 2 dB below your usual level | 8 dB below | the Quiet sounds slider, smoothly, given back over 150 ms |
+
+The limiter after it still catches peaks.
+
+### Measured
+
+Tones are exact. The speech row is one synthetic voice (Windows speech synthesis, a loud, quiet, loud sequence in which the middle third is 12 dB quieter), rendered offline. It is steadier than a human voice, so real speech varies more.
+
+| Test | Result |
+| --- | --- |
+| Quiet sounds set to +10 dB, quiet tone 24 dB below the loud one | +10.0 dB |
+| Loud sounds set to -6 dB, loud tone 18 dB above the usual one | -6.0 dB |
+| Gate at -40 dB or -50 dB on speech (frames above -45 dB) | no frames cut by more than 3 dB |
+| Gate at -30 dB on speech | 0.6 percent of frames cut by more than 3 dB |
+| Normalization +4 / -4 dB, quiet middle third | +3.1 dB average on the quiet part, the loud part after it lowered by 2.4 dB |
+| Normalization +8 / -8 dB, same clip | +6.3 dB on the quiet part, -4.7 dB on the loud part after it |
+| Quiet sounds set to -60 dB, same clip | quiet part reduced by 53 dB |
+
+Boosting quiet sounds also boosts whatever else is quiet, such as the noise between words, so set Quiet sounds to 0 or lower if the pauses get noisy. Use the Noise Gate for hard silence.
 
 ---
 
@@ -379,7 +438,7 @@ Streaming frames are latency bound, not throughput bound, so a GPU does not help
 
 ### Test suites
 
-* `npm test` runs 15 checks against a synthetic noise file: boot, pages, Windows endpoints, noise reduction per mode (RNNoise, Speex, Speex zero latency, Personal, ClearCast), soundboard, close to tray, persistence, and a start check of the built-in personal model.
+* `npm test` runs 21 checks against a synthetic noise file: boot, pages, Windows endpoints, noise reduction per mode (RNNoise, Speex, Speex zero latency, Personal, ClearCast), the noise gate and both loudness sliders (saving, showing dB, silencing below the threshold, lifting quiet speech by +10 dB and lowering loud speech by 6 dB), soundboard, close to tray, persistence, and a start check of the built-in personal model.
 * A 57 check UI audit drives every button, dropdown, slider and dialog, including the training dialog and real writes to the Windows volume, Listen and Enhancements properties (restored afterwards). On a PC that already has the cable installed, the first-run dialog and driver banner checks do not apply and are expected to fail.
 * An end to end run of the in-app flow (save recordings, download the trainer from GitHub, train, validate, load the model) passed with a short training schedule.
 
@@ -395,9 +454,10 @@ flowchart LR
     D -->|Personal, ClearCast| W[AudioWorklet jitter buffer] <--> K[Worker: DFN3 WASM or ONNX Runtime WASM]
     D -->|RNNoise, Speex| R[AudioWorklet]
     D -->|Speex zero latency| Z[AudioWorklet: Speex gains to min-phase FIR]
-    W --> L[Worklet limiter]
-    R --> L
-    Z --> L
+    W --> DY[Worklet: noise gate and loudness normalization]
+    R --> DY
+    Z --> DY
+    DY --> L[Worklet limiter]
     SB[Soundboard buffers] --> B
     L --> B[Bus]
     L --> MON[Monitor output]
@@ -538,6 +598,8 @@ Everything runs on your PC. The only network traffic is downloads: the VB-CABLE 
 * The in-app updater has not been tested end to end. The first real test is 1.1.0 to 1.2.0.
 * There is no Microsoft-signed Vesper driver. The default cable is VB-CABLE, signed by Microsoft and downloaded from VB-Audio. The Vesper kernel loopback compiles and is signed by CI with a self-signed certificate, and has not been exercised on the author's PC (Secure Boot on). Treat it as a fallback and report problems.
 * The cause of "noise cancellation stops after the mic is idle" was not reproduced in tests with 120 s of silence or 7 minutes hidden. The self healing targets the plausible causes and was verified by breaking each one on purpose.
+* The gate has no lookahead, so the first few milliseconds of a word after silence can be softened. On the test voice no frames were cut by more than 3 dB at -40 and -50 dB.
+* Loudness normalization was calibrated and measured on tones and one synthetic voice, not on a real microphone or a real room. It adapts to a new speaking level over seconds to a minute.
 * Fixed 48 kHz 16-bit stereo on the fallback driver. Apps that force exclusive mode with another format cannot open it.
 
 ---
@@ -556,6 +618,7 @@ src/driver.js, models.js        driver and model downloaders
 src/ui/engine.js                audio graph, routing, health monitor, fallback swap
 src/ui/denoise.worklet.js       adaptive jitter buffer
 src/ui/limit.worklet.js         limiter
+src/ui/dynamics.worklet.js      noise gate and loudness normalization
 src/ui/record.worklet.js        raw capture for enrollment and diagnostics
 src/ui/personal.js, diag.js     training dialog and diagnostic recorder
 src/ui/denoise.worker.js        denoiser worker
