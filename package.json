@@ -48,6 +48,14 @@
       {
         "from": "helper/target/release/vesper-helper.exe",
         "to": "vesper-helper.exe"
+      },
+      {
+        "from": "core/target/release/vesper-core.exe",
+        "to": "vesper-core.exe"
+      },
+      {
+        "from": "android-dist/Vesper-Audio-Connector.apk",
+        "to": "connector.apk"
       }
     ],
     "win": {

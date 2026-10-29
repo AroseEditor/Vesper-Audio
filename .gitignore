@@ -5,3 +5,11 @@ src/ui/vendor/
 *.log
 .test-out/
 .cache/
+.claude/
+android-dist/
+core/target/
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+training/__pycache__/
