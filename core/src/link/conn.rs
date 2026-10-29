@@ -123,7 +123,7 @@ fn serve(inner: Arc<Inner>, tcp: TcpStream, peer: SocketAddr) -> io::Result<()> 
         if phones.get(&id).map(|p| p.conn) == Some(conn) {
             if let Some(phone) = phones.remove(&id) {
                 if let Some(sid) = phone.session {
-                    inner.sessions.lock().unwrap().remove(&sid);
+                    inner.end_session(sid);
                 }
             }
         }
@@ -252,6 +252,7 @@ pub(super) fn udp_loop(inner: Arc<Inner>, socket: UdpSocket) {
             None => continue,
         };
         let mut out: Vec<Value> = Vec::new();
+        let mut feedback: Option<(u32, Vec<u8>)> = None;
         {
             let mut sessions = inner.sessions.lock().unwrap();
             let session = match sessions.get_mut(&header.sid) {
@@ -265,7 +266,8 @@ pub(super) fn udp_loop(inner: Arc<Inner>, socket: UdpSocket) {
             session.last_rx = Instant::now();
             session.addr = Some(src);
             match h.kind {
-                KIND_PUNCH | KIND_FEEDBACK => {}
+                KIND_PUNCH => {}
+                KIND_FEEDBACK => feedback = Some((h.sid, plain)),
                 KIND_AUDIO if session.kind == KIND_AUDIO => {
                     session.rx_packets += 1;
                     for (seq, lost, frame) in session.mic.push(h.seq, plain) {
@@ -278,6 +280,9 @@ pub(super) fn udp_loop(inner: Arc<Inner>, socket: UdpSocket) {
         }
         for value in out {
             (inner.emit)("pcm", value);
+        }
+        if let Some((sid, plain)) = feedback {
+            super::video::feedback(&inner, sid, &plain);
         }
     }
 }

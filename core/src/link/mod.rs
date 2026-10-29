@@ -76,6 +76,7 @@ struct Inner {
     sessions: Mutex<HashMap<u32, MediaSession>>,
     port: u16,
     udp_port: u16,
+    udp: UdpSocket,
     stop: AtomicBool,
     next_sid: AtomicU32,
     next_conn: AtomicU32,
@@ -159,6 +160,7 @@ impl Link {
         let udp = UdpSocket::bind(("0.0.0.0", 0))?;
         udp.set_read_timeout(Some(Duration::from_millis(250)))?;
         let udp_port = udp.local_addr()?.port();
+        let udp_recv = udp.try_clone()?;
         let pc_id = hex(&identity.fp[..6]);
         let inner = Arc::new(Inner {
             emit,
@@ -172,6 +174,7 @@ impl Link {
             sessions: Mutex::new(HashMap::new()),
             port,
             udp_port,
+            udp,
             stop: AtomicBool::new(false),
             next_sid: AtomicU32::new(1),
             next_conn: AtomicU32::new(1),
@@ -181,7 +184,7 @@ impl Link {
         let accept = inner.clone();
         thread::spawn(move || accept_loop(accept, listener));
         let media = inner.clone();
-        thread::spawn(move || udp_loop(media, udp));
+        thread::spawn(move || udp_loop(media, udp_recv));
         Ok(Link { inner })
     }
 
@@ -278,16 +281,20 @@ impl Link {
         let crypto = Crypto::new(&key, salt).ok_or("could not create the session key")?;
         self.inner.sessions.lock().unwrap().insert(
             sid,
-            MediaSession { phone: id.to_string(), kind: kind_byte, crypto, addr: None, mic: MicRx::new(), rx_packets: 0, rx_lost: 0, last_rx: Instant::now(), tx_seq: 0 },
+            MediaSession { phone: id.to_string(), kind: kind_byte, crypto, addr: None, mic: MicRx::new(), rx_packets: 0, rx_lost: 0, last_rx: Instant::now(), tx_seq: 0, video: None },
         );
         phone.session = Some(sid);
         phone.session_kind = kind.to_string();
         let mut message = json!({"t": "session.start", "sid": sid, "kind": kind, "udp": self.inner.udp_port, "key": b64(&key), "salt": b64(&salt), "rate": 48000, "ch": 1, "frameMs": 10, "codec": "pcm16", "redundancy": 0});
-        if let Some(video) = video {
-            message["video"] = video;
+        let normalized = if kind == "display" { Some(video::normalize(video)) } else { None };
+        if let Some(v) = &normalized {
+            message["video"] = v.clone();
         }
         let _ = phone.tx.send(Cmd::Send(message));
         drop(phones);
+        if let Some(v) = normalized {
+            video::begin(&self.inner, sid, id.to_string(), v);
+        }
         self.inner.emit_phones();
         Ok(json!({"sid": sid, "udp": self.inner.udp_port}))
     }
@@ -308,26 +315,10 @@ impl Link {
             }
         };
         if let Some(sid) = sid {
-            self.inner.sessions.lock().unwrap().remove(&sid);
+            self.inner.end_session(sid);
             (self.inner.emit)("session", json!({"id": id, "sid": sid, "state": "stopped"}));
             self.inner.emit_phones();
         }
-    }
-
-    pub fn send_media(&self, sid: u32, kind: u8, flags: u8, ts: u32, plaintext: &[u8], socket: &UdpSocket) -> bool {
-        let mut sessions = self.inner.sessions.lock().unwrap();
-        let session = match sessions.get_mut(&sid) {
-            Some(s) => s,
-            None => return false,
-        };
-        let addr = match session.addr {
-            Some(a) => a,
-            None => return false,
-        };
-        let header = Header { kind, flags, sid, seq: session.tx_seq, ts };
-        session.tx_seq = session.tx_seq.wrapping_add(1);
-        let packet = session.crypto.seal(&header, plaintext);
-        socket.send_to(&packet, addr).is_ok()
     }
 }
 
@@ -350,6 +341,23 @@ fn phone_json(phone: &Phone, paired: bool) -> Value {
 }
 
 impl Inner {
+    fn end_session(&self, sid: u32) {
+        let removed = self.sessions.lock().unwrap().remove(&sid);
+        if let Some(mut session) = removed {
+            if let Some(video) = session.video.as_mut() {
+                if let Some(control) = video.control.take() {
+                    if let Ok(mut pipe) = control.lock() {
+                        let _ = std::io::Write::write_all(&mut *pipe, b"{\"t\":\"stop\"}
+");
+                    }
+                }
+                if let Some(mut child) = video.child.take() {
+                    let _ = child.kill();
+                }
+            }
+        }
+    }
+
     fn phones_json(&self) -> Value {
         let store = self.store.lock().unwrap();
         let phones = self.phones.lock().unwrap();
@@ -374,4 +382,5 @@ impl Inner {
 }
 
 mod conn;
+mod video;
 use conn::{accept_loop, udp_loop};

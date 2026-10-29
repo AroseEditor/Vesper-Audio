@@ -1,11 +1,12 @@
-use crate::link::media::{Crypto, Header, KIND_AUDIO, KIND_PUNCH};
+use crate::link::media::{Crypto, Header, KIND_AUDIO, KIND_FEEDBACK, KIND_PUNCH, KIND_VIDEO};
 use crate::link::proto::{b64, hex, sas_code, sha256, unb64, write_frame, FrameReader};
 use crate::link::tls;
 use rand::Rng;
 use rustls::pki_types::ServerName;
 use rustls::{ClientConnection, StreamOwned};
 use serde_json::{json, Value};
-use std::io;
+use std::collections::HashMap;
+use std::io::{self, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -26,6 +27,7 @@ pub struct Opts {
     pub auto_confirm: bool,
     pub confirm_delay_ms: u64,
     pub mute_after_ms: u64,
+    pub video_dump: Option<PathBuf>,
 }
 
 #[derive(Default, Debug)]
@@ -36,6 +38,10 @@ pub struct Report {
     pub session: bool,
     pub sent: u32,
     pub dropped: u32,
+    pub frames: u32,
+    pub keys: u32,
+    pub video_bytes: u64,
+    pub saw_parameter_sets: bool,
     pub fp: String,
     pub error: Option<String>,
 }
@@ -99,6 +105,110 @@ fn wait(reader: &mut FrameReader, stream: &mut StreamOwned<ClientConnection, Tcp
         }
         if Instant::now() > until {
             return Err(io::Error::new(io::ErrorKind::TimedOut, "timed out"));
+        }
+    }
+}
+
+#[derive(Default)]
+struct VideoCounts {
+    frames: u32,
+    keys: u32,
+    bytes: u64,
+    sets: bool,
+}
+
+fn has_nal(data: &[u8], kind: u8) -> bool {
+    let mut i = 0;
+    while i + 3 < data.len() {
+        if data[i] == 0 && data[i + 1] == 0 && data[i + 2] == 1 {
+            if (data[i + 3] & 0x1f) == kind {
+                return true;
+            }
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    false
+}
+
+fn video(host: std::net::IpAddr, params: Value, counts: Arc<std::sync::Mutex<VideoCounts>>, dump: Option<PathBuf>, stop: Arc<AtomicBool>) {
+    let sid = params["sid"].as_u64().unwrap_or(0) as u32;
+    let port = params["udp"].as_u64().unwrap_or(0) as u16;
+    let key = unb64(params["key"].as_str().unwrap_or("")).unwrap_or_default();
+    let salt_bytes = unb64(params["salt"].as_str().unwrap_or("")).unwrap_or_default();
+    if salt_bytes.len() != 4 {
+        return;
+    }
+    let crypto = match Crypto::new(&key, [salt_bytes[0], salt_bytes[1], salt_bytes[2], salt_bytes[3]]) {
+        Some(c) => c,
+        None => return,
+    };
+    let socket = match UdpSocket::bind("0.0.0.0:0") {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let _ = socket.set_read_timeout(Some(Duration::from_millis(40)));
+    let dest = SocketAddr::new(host, port);
+    let mut file = dump.and_then(|p| std::fs::File::create(p).ok());
+    let mut seq: u32 = 1;
+    let mut last_report = Instant::now() - Duration::from_secs(1);
+    let mut got_key = false;
+    let mut partial: HashMap<u32, (u16, Vec<Option<Vec<u8>>>, bool)> = HashMap::new();
+    let mut buf = vec![0u8; 2048];
+    while !stop.load(Ordering::SeqCst) {
+        if last_report.elapsed() >= Duration::from_millis(100) {
+            last_report = Instant::now();
+            let mut plain = vec![0u8; 22];
+            let flags: u16 = if got_key { 0 } else { 1 };
+            plain[18..20].copy_from_slice(&flags.to_be_bytes());
+            let packet = crypto.seal(&Header { kind: KIND_FEEDBACK, flags: 0, sid, seq, ts: 0 }, &plain);
+            seq = seq.wrapping_add(1);
+            let _ = socket.send_to(&packet, dest);
+            if !got_key {
+                let punch = crypto.seal(&Header { kind: KIND_PUNCH, flags: 0, sid, seq, ts: 0 }, &[]);
+                seq = seq.wrapping_add(1);
+                let _ = socket.send_to(&punch, dest);
+            }
+        }
+        let n = match socket.recv_from(&mut buf) {
+            Ok((n, _)) => n,
+            Err(_) => continue,
+        };
+        let (header, plain) = match crypto.open(&buf[..n]) {
+            Some(v) => v,
+            None => continue,
+        };
+        if header.kind != KIND_VIDEO || plain.len() < 8 {
+            continue;
+        }
+        let frame = u32::from_be_bytes([plain[0], plain[1], plain[2], plain[3]]);
+        let index = u16::from_be_bytes([plain[4], plain[5]]);
+        let count = u16::from_be_bytes([plain[6], plain[7]]);
+        let entry = partial.entry(frame).or_insert((count, vec![None; count as usize], header.flags & 1 == 1));
+        if (index as usize) < entry.1.len() {
+            entry.1[index as usize] = Some(plain[8..].to_vec());
+        }
+        if entry.1.iter().all(|p| p.is_some()) {
+            let (_, parts, key) = partial.remove(&frame).unwrap();
+            let data: Vec<u8> = parts.into_iter().flat_map(|p| p.unwrap()).collect();
+            if let Some(f) = file.as_mut() {
+                let _ = f.write_all(&data);
+            }
+            let mut c = counts.lock().unwrap();
+            c.frames += 1;
+            c.bytes += data.len() as u64;
+            if key {
+                c.keys += 1;
+                got_key = true;
+                if has_nal(&data, 7) && has_nal(&data, 8) && has_nal(&data, 5) {
+                    c.sets = true;
+                }
+            }
+        }
+        if partial.len() > 64 {
+            let oldest = *partial.keys().min().unwrap();
+            partial.remove(&oldest);
         }
     }
 }
@@ -238,6 +348,7 @@ fn run_inner(opts: &Opts, report: &mut Report) -> io::Result<()> {
     let sent = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let dropped = Arc::new(std::sync::atomic::AtomicU32::new(0));
     let muted = Arc::new(AtomicBool::new(false));
+    let counts = Arc::new(std::sync::Mutex::new(VideoCounts::default()));
     let mut worker: Option<thread::JoinHandle<()>> = None;
     let started = Instant::now();
     let mut last_ping = Instant::now() - Duration::from_secs(2);
@@ -255,7 +366,13 @@ fn run_inner(opts: &Opts, report: &mut Report) -> io::Result<()> {
                 report.session = true;
                 let (stop2, sent2, dropped2, muted2) = (stop.clone(), sent.clone(), dropped.clone(), muted.clone());
                 let (loss, reorder) = (opts.loss, opts.reorder);
-                worker = Some(thread::spawn(move || media(host, m, loss, reorder, muted2, stop2, sent2, dropped2)));
+                if m["kind"].as_str() == Some("display") {
+                    let counts2 = counts.clone();
+                    let dump = opts.video_dump.clone();
+                    worker = Some(thread::spawn(move || video(host, m, counts2, dump, stop2)));
+                } else {
+                    worker = Some(thread::spawn(move || media(host, m, loss, reorder, muted2, stop2, sent2, dropped2)));
+                }
             }
         }
     }
@@ -264,6 +381,13 @@ fn run_inner(opts: &Opts, report: &mut Report) -> io::Result<()> {
         let _ = w.join();
     }
     let _ = write_frame(&mut stream, &json!({"t": "bye"}));
+    {
+        let c = counts.lock().unwrap();
+        report.frames = c.frames;
+        report.keys = c.keys;
+        report.video_bytes = c.bytes;
+        report.saw_parameter_sets = c.sets;
+    }
     report.sent = sent.load(Ordering::SeqCst);
     report.dropped = dropped.load(Ordering::SeqCst);
     Ok(())

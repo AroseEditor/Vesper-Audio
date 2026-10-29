@@ -20,6 +20,7 @@ fn main() {
         auto_confirm: !args.iter().any(|a| a == "--no-confirm"),
         confirm_delay_ms: arg(&args, "--confirm-delay").and_then(|v| v.parse().ok()).unwrap_or(500),
         mute_after_ms: arg(&args, "--mute-after").and_then(|v| v.parse().ok()).unwrap_or(0),
+        video_dump: arg(&args, "--dump").map(PathBuf::from),
     };
     let report = run(opts);
     println!("{:?}", report);

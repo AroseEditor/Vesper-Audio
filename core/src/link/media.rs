@@ -1,6 +1,6 @@
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes128Gcm, Nonce};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::net::SocketAddr;
 use std::time::Instant;
 
@@ -137,4 +137,17 @@ pub struct MediaSession {
     pub rx_lost: u64,
     pub last_rx: Instant,
     pub tx_seq: u32,
+    pub video: Option<VideoState>,
+}
+
+pub struct VideoState {
+    pub frame_id: u32,
+    pub ring: VecDeque<(u32, Vec<Vec<u8>>)>,
+    pub kbps: u32,
+    pub max_kbps: u32,
+    pub last_lost: u32,
+    pub last_report: Instant,
+    pub last_raise: Instant,
+    pub control: Option<std::sync::Arc<std::sync::Mutex<std::process::ChildStdin>>>,
+    pub child: Option<std::process::Child>,
 }

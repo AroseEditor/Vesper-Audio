@@ -29,7 +29,7 @@ fn loopback(uri: &str) -> String {
 }
 
 fn opts(dir: PathBuf, qr: Option<String>, addr: Option<String>, seconds: u64, loss: f64) -> Opts {
-    Opts { qr, addr, dir, name: "Test Phone".into(), id: "test-phone-1".into(), mode: "mic".into(), seconds, loss, reorder: loss > 0.0, auto_confirm: true, confirm_delay_ms: 300, mute_after_ms: 0 }
+    Opts { qr, addr, dir, name: "Test Phone".into(), id: "test-phone-1".into(), mode: "mic".into(), seconds, loss, reorder: loss > 0.0, auto_confirm: true, confirm_delay_ms: 300, mute_after_ms: 0, video_dump: None }
 }
 
 fn wait_for<F: Fn() -> bool>(limit: Duration, check: F) -> bool {
@@ -156,4 +156,29 @@ fn muting_on_the_phone_is_reported_and_stops_the_audio() {
     let report = handle.join().unwrap();
     assert!(report.error.is_none(), "{:?}", report.error);
     link.stop();
+}
+
+#[cfg(windows)]
+#[test]
+fn the_screen_reaches_the_phone_as_valid_h264() {
+    if vesper_core::display::capture::monitors().is_empty() {
+        println!("no monitor available, skipping");
+        return;
+    }
+    let (link, _events, _dir) = start("display");
+    let uri = loopback(&link.pair_uri());
+    let dump = std::env::temp_dir().join(format!("vesper-display-test-{}.h264", std::process::id()));
+    let dump_for_phone = dump.clone();
+    let phone_dir = temp("display-phone");
+    let handle = thread::spawn(move || run(Opts { mode: "display".into(), video_dump: Some(dump_for_phone), ..opts(phone_dir, Some(uri), None, 7, 0.0) }));
+    assert!(wait_for(Duration::from_secs(8), || link.phones().as_array().map(|a| a.iter().any(|p| p["online"] == true && p["paired"] == true && p["intent"] == "display")).unwrap_or(false)));
+    link.start_session("test-phone-1", "display", Some(serde_json::json!({"w": 1280, "h": 720, "fps": 30, "kbps": 6000}))).unwrap();
+    let report = handle.join().unwrap();
+    assert!(report.error.is_none(), "{:?}", report.error);
+    assert!(report.frames >= 1, "no frame arrived");
+    assert!(report.keys >= 1 && report.saw_parameter_sets, "the first frame must be a keyframe with SPS and PPS: {:?}", report);
+    assert!(report.video_bytes > 2000);
+    link.stop();
+    let size = std::fs::metadata(&dump).map(|m| m.len()).unwrap_or(0);
+    assert_eq!(size, report.video_bytes);
 }
