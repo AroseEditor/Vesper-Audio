@@ -8,6 +8,12 @@ const ico = (name, size) => {
   return el
 }
 
+const QUALITY = {
+  low: { label: 'Low latency: 720p, 30 fps', w: 1280, h: 720, fps: 30, kbps: 6000 },
+  balanced: { label: 'Balanced: 1080p, 30 fps', w: 1920, h: 1080, fps: 30, kbps: 12000 },
+  smooth: { label: 'Smooth: 1080p, 60 fps', w: 1920, h: 1080, fps: 60, kbps: 16000 }
+}
+
 const RELEASES = 'https://github.com/AroseEditor/Vesper-Audio/releases/latest'
 const CODE_REFRESH_MS = 100000
 
@@ -30,6 +36,9 @@ export class Phones {
     this.apk = null
     this.watch = null
     this.codeTimer = null
+    this.firewall = null
+    this.vdd = null
+    this.vddBusy = ''
   }
 
   async init() {
@@ -42,6 +51,7 @@ export class Phones {
     })
     const wanted = String(this.state.settings.inputId || '').startsWith('phone:') || (await this.api.invoke('link:paired').catch(() => false))
     if (wanted) await this.refresh()
+    this.refreshSystem()
   }
 
   call(method, params = {}) {
@@ -100,6 +110,9 @@ export class Phones {
       this.changed()
     } else if (name === 'sas') {
       this.showCode(data)
+    } else if (name === 'display') {
+      if (data.state === 'error') this.notice('display', { text: data.message })
+      else if (data.state === 'started') this.notice('display', null)
     }
   }
 
@@ -246,6 +259,101 @@ export class Phones {
     })
   }
 
+  async refreshSystem() {
+    this.firewall = await this.api.invoke('firewall:status').catch(() => ({ allowed: false }))
+    this.vdd = await this.api.invoke('display:status').catch(() => ({ nodePresent: false, running: false, monitors: [] }))
+    this.renderSettings()
+    this.render()
+  }
+
+  async allowFirewall() {
+    try {
+      await this.api.invoke('firewall:allow')
+    } catch (err) {
+      this.notice('link', { text: this.reason(err) })
+    }
+    await this.refreshSystem()
+  }
+
+  async installDisplayDriver() {
+    this.vddBusy = 'Installing'
+    this.render()
+    this.renderSettings()
+    const off = this.api.on('display:progress', p => {
+      this.vddBusy = `${p.message || 'Installing'} ${p.percent || 0}%`
+      this.renderSettings()
+      this.render()
+    })
+    try {
+      const result = await this.api.invoke('display:install')
+      this.notice('display', result.rebootRequired ? { text: 'The virtual display driver is installed. Restart Windows to finish.' } : null)
+    } catch (err) {
+      this.notice('display', { text: 'Virtual display driver: ' + this.reason(err) })
+    }
+    off()
+    this.vddBusy = ''
+    await this.refreshSystem()
+  }
+
+  async removeDisplayDriver() {
+    this.vddBusy = 'Removing'
+    this.renderSettings()
+    try {
+      await this.api.invoke('display:uninstall')
+    } catch (err) {
+      this.notice('display', { text: 'Virtual display driver: ' + this.reason(err) })
+    }
+    this.vddBusy = ''
+    await this.refreshSystem()
+  }
+
+  virtualMonitor() {
+    return ((this.vdd && this.vdd.monitors) || []).find(m => m.virtual) || null
+  }
+
+  async startDisplay(phone) {
+    const q = QUALITY[this.state.settings.displayQuality] || QUALITY.low
+    const virtual = this.virtualMonitor()
+    let monitor = ''
+    if (virtual) {
+      await this.api.invoke('display:mode', virtual.device, q.w, q.h, q.fps).catch(() => {})
+      monitor = virtual.device
+    }
+    try {
+      await this.call('link.session.start', { id: phone.id, kind: 'display', video: { w: q.w, h: q.h, fps: q.fps, kbps: q.kbps, idrMs: 2000, monitor } })
+      this.notice('display', null)
+    } catch (err) {
+      this.notice('display', { text: this.reason(err) })
+    }
+  }
+
+  stopDisplay(phone) {
+    return this.call('link.session.stop', { id: phone.id }).catch(() => {})
+  }
+
+  driverText() {
+    const v = this.vdd
+    if (this.vddBusy) return this.vddBusy
+    if (!v) return 'Checking the virtual display driver'
+    if (v.running) return 'Virtual display driver installed. Your phone can be an extra monitor.'
+    if (v.nodePresent) return `Virtual display driver installed but Windows could not start it (code ${v.problem}).`
+    return 'Virtual display driver not installed. Without it your phone mirrors your main screen.'
+  }
+
+  renderSettings() {
+    const root = $('set-link-root')
+    if (!root) return
+    const row = (title, ...controls) => h('div', { class: 'card row' }, h('span', { class: 'title', text: title }), h('span', { class: 'btn-group' }, ...controls))
+    const btn = (label, onclick, disabled) => h('button', { class: 'btn', type: 'button', text: label, onclick, disabled: Boolean(disabled) })
+    const status = this.status
+    const rows = [
+      row(status ? `Phone link is on: ${status.name}, port ${status.port}` : this.failed || 'Phone link starts when you open Second Monitor or add a phone', btn('Download Vesper Audio Connector', () => this.openApk()), ...(this.firewall && !this.firewall.allowed && status ? [btn('Allow in Windows Firewall', () => this.allowFirewall())] : [])),
+      ...this.paired().map(p => row(`Phone: ${p.name}${p.model ? ' (' + p.model + ')' : ''}${p.online ? ', online' : ', offline'}`, btn('Forget', () => this.call('link.forget', { id: p.id })))),
+      row(this.driverText(), btn('Install', () => this.installDisplayDriver(), this.vddBusy || (this.vdd && this.vdd.nodePresent)), btn('Uninstall', () => this.removeDisplayDriver(), this.vddBusy || !(this.vdd && this.vdd.nodePresent)))
+    ]
+    root.replaceChildren(...rows)
+  }
+
   render() {
     const root = $('display-root')
     if (!root) return
@@ -253,6 +361,8 @@ export class Phones {
     const rows = phones.map(p => {
       const actions = []
       if (p.paired) {
+        if (p.online && p.sessionKind === 'display') actions.push(h('button', { class: 'btn small primary', type: 'button', text: 'Stop the screen', onclick: () => this.stopDisplay(p) }))
+        else if (p.online && p.intent === 'display') actions.push(h('button', { class: 'btn small primary', type: 'button', text: 'Use as second monitor', onclick: () => this.startDisplay(p) }))
         actions.push(h('button', { class: 'btn small', type: 'button', text: 'Use as microphone', onclick: () => this.use(p) }))
         actions.push(h('button', { class: 'btn small', type: 'button', text: 'Forget', onclick: () => this.call('link.forget', { id: p.id }) }))
       }
@@ -264,6 +374,24 @@ export class Phones {
         { class: 'card' },
         h('h3', { class: 'card-title', text: 'Your phones' }),
         ...(rows.length ? rows : [h('p', { class: 'muted', text: this.failed || 'No phone yet. Install Vesper Audio Connector on your phone, open it and scan the code below.' })])
+      ),
+      h(
+        'div',
+        { class: 'card' },
+        h('h3', { class: 'card-title', text: 'Second monitor' }),
+        h('p', { class: 'muted', text: this.driverText() }),
+        h(
+          'div',
+          { class: 'row' },
+          h('span', { class: 'muted', text: 'Quality' }),
+          (() => {
+            const select = h('select', { class: 'phone-select' }, ...Object.entries(QUALITY).map(([key, q]) => h('option', { value: key, text: q.label, selected: key === (this.state.settings.displayQuality || 'low') })))
+            select.addEventListener('change', () => this.save({ displayQuality: select.value }))
+            return select
+          })(),
+          this.vdd && this.vdd.nodePresent ? null : h('button', { class: 'btn small', type: 'button', text: this.vddBusy || 'Install virtual display driver', disabled: Boolean(this.vddBusy), onclick: () => this.installDisplayDriver() })
+        ),
+        h('p', { class: 'hint', text: 'On the phone choose Use as second monitor in Vesper Audio Connector, then press Use as second monitor next to the phone above.' })
       ),
       h(
         'div',

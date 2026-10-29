@@ -251,6 +251,52 @@ async function phoneMic(page) {
   await page.evaluate(() => window.__vesper.save({ inputId: '' }))
 }
 
+async function phoneDisplay(page) {
+  const fake = fakePhonePath()
+  if (!fake) return
+  const dump = path.join(work, 'screen.h264')
+  const uri = await page.evaluate(() => window.__vesper.api.invoke('link:call', 'link.pairUri', {}).then(r => r.uri))
+  const local = uri.split('&').map(part => (part.startsWith('a=') ? 'a=127.0.0.1' : part)).join('&')
+  const dir = fs.mkdtempSync(path.join(work, 'phone-display-'))
+  const child = spawn(fake, ['--qr', local, '--dir', dir, '--name', 'Display Phone', '--id', 'display-phone', '--mode', 'display', '--seconds', '9', '--dump', dump], { stdio: 'ignore', windowsHide: true })
+  const poll = async (limit, fn, arg) => {
+    for (let i = 0; i < limit * 4; i++) {
+      const value = await page.evaluate(fn, arg)
+      if (value) return value
+      await new Promise(res => setTimeout(res, 250))
+    }
+    return null
+  }
+  const phone = await poll(14, () => window.__vesper.phones.list.find(p => p.paired && p.online && p.intent === 'display') || null)
+  check('a phone that opened the second monitor screen is listed', Boolean(phone), phone ? phone.name : 'none')
+  if (!phone) {
+    child.kill()
+    return
+  }
+  await page.evaluate(() => window.__vesper.api.invoke('app:log', 'display test'))
+  await page.evaluate(() => document.querySelector('.nav[data-page="display"]').click())
+  await page.evaluate(p => window.__vesper.phones.startDisplay(p), phone)
+  const active = await poll(10, () => window.__vesper.phones.list.some(p => p.sessionKind === 'display'))
+  check('the PC starts sending the screen to the phone', Boolean(active))
+  await new Promise(res => setTimeout(res, 3500))
+  const button = await page.evaluate(() => [...document.querySelectorAll('#display-root .btn')].map(b => b.textContent))
+  check('the Second Monitor page offers to stop the screen while it is shown', button.includes('Stop the screen'), button.join('|'))
+  const rows = await page.evaluate(() => {
+    document.querySelector('.nav[data-page="settings"]').click()
+    return document.querySelectorAll('#set-link-root .card.row').length
+  })
+  check('Settings lists the phone link, the paired phone and the display driver', rows >= 3, 'rows ' + rows)
+  await new Promise(res => setTimeout(res, 4500))
+  child.kill()
+  const bytes = fs.existsSync(dump) ? fs.readFileSync(dump) : Buffer.alloc(0)
+  const nal = type => {
+    for (let i = 0; i + 4 < bytes.length; i++) if (bytes[i] === 0 && bytes[i + 1] === 0 && bytes[i + 2] === 1 && (bytes[i + 3] & 31) === type) return true
+    return false
+  }
+  check('the phone received a keyframe with parameter sets over the encrypted link', bytes.length > 2000 && nal(7) && nal(8) && nal(5), bytes.length + ' bytes')
+  await page.evaluate(() => document.querySelector('.nav[data-page="home"]').click())
+}
+
 async function main() {
   const noiseWav = path.join(work, 'noise.wav')
   writeWav(noiseWav, noise(12, 0.08), 48000)
@@ -285,6 +331,7 @@ async function main() {
   check('cost ladder steps Personal down to the standard model and back', ladder.stepped.active === 'dfn3' && /standard model/.test(ladder.stepped.warning) && ladder.stepped.lowered && ladder.back === 'personal', JSON.stringify(ladder))
   await dynamics(page)
   await phoneMic(page)
+  if (require('child_process').spawnSync(path.join(root, 'core', 'target', 'release', 'vesper-display.exe'), ['--list']).stdout.toString().includes('DISPLAY')) await phoneDisplay(page)
 
   await page.evaluate(() => window.__vesper.save({ ai: false, basic: false, closeToTray: true, boardVolume: 42, speexDb: -31, aiStrength: 55, basicPreset: 'speex' }))
   const sounds = await page.evaluate(() => window.__vesper.api.invoke('sounds:add'))

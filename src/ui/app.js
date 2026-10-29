@@ -155,6 +155,7 @@ function setPage(name) {
   for (const el of document.querySelectorAll('.page')) el.classList.toggle('active', el.id === 'page-' + name)
   for (const el of document.querySelectorAll('.nav')) el.classList.toggle('active', el.dataset.page === name)
   if (name === 'properties' || name === 'home') refreshDevices()
+  if ((name === 'display' || name === 'settings') && phones) phones.refreshSystem()
   if (name === 'display' && phones) phones.refresh().then(() => phones.newCode())
 }
 
@@ -416,6 +417,8 @@ function renderSettings() {
   $('set-voice-text').textContent = personal.note()
   $('set-voice').textContent = personal.button()
   $('set-voice-remove').hidden = !personal.model()
+  $('set-perf-text').textContent = engine.lowered() ? 'Performance: reduced, this PC could not keep up with the full model' : 'Performance: full quality'
+  if (phones) phones.renderSettings()
 }
 
 function renderAll() {
@@ -833,6 +836,11 @@ function bindControls() {
   }
   $('voice-enroll').addEventListener('click', () => personal.open())
   $('add-phone').addEventListener('click', () => phones.openAdd())
+  $('set-perf').addEventListener('click', async () => {
+    await save({ perfPersonal: 0, perfClearcast: 0 })
+    engine.resetRung()
+    renderSettings()
+  })
 
   let levelTimer = null
   $('level').addEventListener('input', e => {
