@@ -34,34 +34,50 @@
 
 ## Contents
 
-1. [What's new in 2.0.2](#whats-new-in-202)
-2. [What's new in 2.0.1](#whats-new-in-201)
-3. [What's new in 2.0.0](#whats-new-in-200)
-4. [What it is](#what-it-is)
-5. [Screens](#screens)
-6. [Install and updates](#install-and-updates)
-7. [Quick start](#quick-start)
-8. [Vesper Audio Connector (Android)](#vesper-audio-connector-android)
-9. [Phone microphone](#phone-microphone)
-10. [Second monitor](#second-monitor)
-11. [Vesper Link: pairing, security and the network](#vesper-link-pairing-security-and-the-network)
-12. [Features](#features)
-13. [Noise cancellation modes](#noise-cancellation-modes)
-14. [Noise gate and loudness normalization](#noise-gate-and-loudness-normalization)
-15. [Train your voice model](#train-your-voice-model)
-16. [Latency and performance on low-end PCs](#latency-and-performance-on-low-end-pcs)
-17. [Reliable audio and diagnostics](#reliable-audio-and-diagnostics)
-18. [Vesper Audio Cable](#vesper-audio-cable)
-19. [Real Windows properties](#real-windows-properties)
-20. [Tests and benchmarks](#tests-and-benchmarks)
-21. [Architecture](#architecture)
-22. [Build from source](#build-from-source)
-23. [CI and releases](#ci-and-releases)
-24. [Data and privacy](#data-and-privacy)
-25. [Troubleshooting](#troubleshooting)
-26. [Honest limits](#honest-limits)
-27. [Repository layout](#repository-layout)
-28. [Licenses and credits](#licenses-and-credits)
+1. [What's new in 2.0.3](#whats-new-in-203)
+2. [What's new in 2.0.2](#whats-new-in-202)
+3. [What's new in 2.0.1](#whats-new-in-201)
+4. [What's new in 2.0.0](#whats-new-in-200)
+5. [What it is](#what-it-is)
+6. [Screens](#screens)
+7. [Install and updates](#install-and-updates)
+8. [Quick start](#quick-start)
+9. [Vesper Audio Connector (Android)](#vesper-audio-connector-android)
+10. [Phone microphone](#phone-microphone)
+11. [Second monitor](#second-monitor)
+12. [Vesper Link: pairing, security and the network](#vesper-link-pairing-security-and-the-network)
+13. [Features](#features)
+14. [Noise cancellation modes](#noise-cancellation-modes)
+15. [Noise gate and loudness normalization](#noise-gate-and-loudness-normalization)
+16. [Train your voice model](#train-your-voice-model)
+17. [Latency and performance on low-end PCs](#latency-and-performance-on-low-end-pcs)
+18. [Reliable audio and diagnostics](#reliable-audio-and-diagnostics)
+19. [Vesper Audio Cable](#vesper-audio-cable)
+20. [Real Windows properties](#real-windows-properties)
+21. [Tests and benchmarks](#tests-and-benchmarks)
+22. [Architecture](#architecture)
+23. [Build from source](#build-from-source)
+24. [CI and releases](#ci-and-releases)
+25. [Data and privacy](#data-and-privacy)
+26. [Troubleshooting](#troubleshooting)
+27. [Honest limits](#honest-limits)
+28. [Repository layout](#repository-layout)
+29. [Licenses and credits](#licenses-and-credits)
+
+---
+
+## What's new in 2.0.3
+
+Version 2.0.3 makes the second monitor a real extra monitor and stops it from slowing Windows down.
+
+| Fix | What changed |
+| --- | --- |
+| **The virtual display is on only while you use it** | The virtual monitor used to stay attached to Windows the whole time the driver was installed, which costs the graphics driver and the desktop compositor work for a screen nobody is looking at. Now **Use as second monitor** turns the virtual display on, and it is turned off again when you stop the screen, when the phone disconnects, when the session fails, when the link component stops, and when you quit Vesper Audio. If a crash ever leaves it on, it is turned off the next time Vesper Audio starts. |
+| **It really extends now** | Earlier versions only used the virtual monitor if Windows had already attached it, so most of the time the phone mirrored the main screen. Vesper Audio now attaches it itself, to the right of your real screens, at the size and refresh rate of the chosen quality, so you drag windows onto it. |
+| **Your real screens are left alone** | Changing the screen layout can reset the refresh rate of your main display. Vesper Audio records the size and refresh rate of every real display first and puts them back afterwards. |
+| **No extra administrator prompt** | Turning the virtual display on and off uses Windows display settings, not the driver install, so it does not ask for approval. Only the one-time driver install does. |
+
+This was tested on a real PC with the real driver installed: the virtual monitor attached at 1280 x 720 to the right of the main screen, detached again, and the main screen stayed at 165 Hz through both. The full path with a phone (a session that turns it on and off) is covered by the stand-in phone tests for the stream and has not been run with a real phone.
 
 ---
 
@@ -282,7 +298,7 @@ Latency has not been measured on a real phone. The stages are the phone's captur
 **Extended or mirrored.**
 
 * **Without** the virtual display driver, the phone shows a **mirror of your main screen**.
-* **With** the driver, Windows gets a new monitor that exists only for the phone. The app captures that monitor, so you drag windows onto it like any other screen. Install it from **Second Monitor** or **Settings**.
+* **With** the driver, the phone becomes a real extra monitor. When you press **Use as second monitor**, Vesper Audio turns the virtual display on to the right of your screens, at the size and refresh rate of the chosen quality, and captures it, so you drag windows onto it like any other screen. When the screen stops it turns the virtual display off again, so it costs nothing while you are not using it. Install the driver from **Second Monitor** or **Settings**.
 
 **The virtual display driver.** It is the open source [Virtual Display Driver](https://github.com/VirtualDrivers/Virtual-Display-Driver) (MIT licensed, release 25.7.23), a user-mode (UMDF) indirect display driver whose catalog and DLL are signed by the SignPath Foundation. Installing:
 
@@ -291,7 +307,7 @@ Latency has not been measured on a real phone. The stages are the phone's captur
 3. asks Windows for administrator approval once, trusts that signer in the Trusted Publishers store, creates the device `Root\MttVDD` and installs the INF,
 4. copies the driver's default `vdd_settings.xml` (resolutions 800 x 600 up to 3840 x 2160) to `C:\VirtualDisplayDriver` and makes the folder editable.
 
-**Uninstall** removes the device and the driver package. The virtual monitor stays attached to Windows for as long as the driver is installed, so remove the driver to get rid of it. It needs Microsoft Visual C++ runtime and a GPU driver that supports indirect display drivers (all current ones do).
+**Uninstall** removes the device and the driver package. While the driver is installed but not in use, the virtual monitor is switched off (not attached to the desktop). It needs Microsoft Visual C++ runtime and a GPU driver that supports indirect display drivers (all current ones do).
 
 Measured on the development PC (1920 x 1080 desktop, encoded at 1280 x 720, Windows software encoder): about 3 ms to encode a frame on average. The stream was decoded again with the browser's H.264 decoder: 77 of 77 frames decoded at 1280 x 720. End to end through the app, a stand-in phone received a valid keyframe with parameter sets over the encrypted link, and the bytes that arrived equal the bytes that were sent.
 
@@ -654,7 +670,8 @@ On the phone, the pairing key lives in the Android Keystore and the paired PC (a
 | Phone microphone crackles | Move closer to the router or use 5 GHz. The jitter buffer grows on its own and shrinks again. |
 | The phone is selected but silent | Check the phone says **Microphone is on** and not muted, and that the Home device shows **connected**. |
 | The second monitor never starts | On the phone open **Use as second monitor** first, then press **Use as second monitor** on the PC. Check the PC can capture the screen (a UAC prompt or the lock screen blocks capture and the picture resumes by itself). |
-| Second monitor shows my main screen | The virtual display driver is not installed, so it mirrors. Install it from Second Monitor or Settings. |
+| Second monitor shows my main screen | The virtual display driver is not installed, or Windows refused to turn the virtual display on (the page says so). Install it from Second Monitor or Settings, then press **Use as second monitor** again. |
+| Windows is slow or laggy | The virtual display is only on while the phone uses it. If it is still on with no phone connected, quit and start Vesper Audio once and it is switched off at startup. Lower the quality to **Low latency** for the least load. |
 | The virtual display driver installs but shows nothing | Restart Windows once. If you updated your graphics driver recently, remove the virtual display driver first and install it again. |
 | Black or confusing screens after a graphics driver update | Remove the virtual display driver (Settings, Uninstall) and reinstall it. |
 | Vesper Audio Cable not in other apps | Check the banner on Home. Install not finished: press **Install**. Restart needed: press **Restart**. |

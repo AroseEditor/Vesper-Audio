@@ -4,7 +4,7 @@ plugins {
 }
 
 val runNumber = (System.getenv("GITHUB_RUN_NUMBER") ?: "1").toInt()
-val connectorVersion = System.getenv("CONNECTOR_VERSION") ?: "2.0.2"
+val connectorVersion = System.getenv("CONNECTOR_VERSION") ?: "2.0.3"
 
 android {
     namespace = "com.ayushue5.vesperaudio.connector"
