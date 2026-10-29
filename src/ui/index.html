@@ -16,6 +16,7 @@
       <button class="nav active" data-page="home" title="Home" aria-label="Home"><span data-icon="home" data-size="22"></span></button>
       <button class="nav" data-page="properties" title="Properties" aria-label="Properties"><span data-icon="sliders" data-size="22"></span></button>
       <button class="nav" data-page="board" title="Sound-Board" aria-label="Sound-Board"><span data-icon="board" data-size="22"></span></button>
+      <button class="nav" data-page="display" title="Second Monitor" aria-label="Second Monitor"><span data-icon="monitor" data-size="22"></span></button>
       <button class="nav bottom" data-page="settings" title="Settings" aria-label="Settings"><span data-icon="settings" data-size="22"></span></button>
     </nav>
 
@@ -31,6 +32,7 @@
               <button class="select-btn" type="button"><span class="select-text" data-device-name>No device</span><span data-icon="chevron" data-size="18"></span></button>
               <div class="menu" hidden></div>
             </div>
+            <button class="btn small" id="add-phone" type="button"><span data-icon="plus" data-size="16"></span><span>Add phone mic</span></button>
           </div>
         </div>
 
@@ -148,6 +150,12 @@
           <div class="slider-row compact"><span class="muted">Volume</span><input type="range" id="board-volume" min="0" max="100" step="1"><output id="board-volume-out">100%</output></div>
         </div>
         <div class="grid" id="sound-grid"></div>
+      </section>
+
+      <section class="page" id="page-display">
+        <h1>Second Monitor</h1>
+        <p class="muted lead">Use your phone as a wireless second screen or as your microphone.</p>
+        <div id="display-root"></div>
       </section>
 
       <section class="page" id="page-settings">

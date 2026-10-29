@@ -51,6 +51,7 @@ struct Phone {
     addr: String,
     tx: Sender<Cmd>,
     session: Option<u32>,
+    session_kind: String,
     rtt: i64,
     battery: i64,
     muted: bool,
@@ -280,6 +281,7 @@ impl Link {
             MediaSession { phone: id.to_string(), kind: kind_byte, crypto, addr: None, mic: MicRx::new(), rx_packets: 0, rx_lost: 0, last_rx: Instant::now(), tx_seq: 0 },
         );
         phone.session = Some(sid);
+        phone.session_kind = kind.to_string();
         let mut message = json!({"t": "session.start", "sid": sid, "kind": kind, "udp": self.inner.udp_port, "key": b64(&key), "salt": b64(&salt), "rate": 48000, "ch": 1, "frameMs": 10, "codec": "pcm16", "redundancy": 0});
         if let Some(video) = video {
             message["video"] = video;
@@ -296,6 +298,7 @@ impl Link {
             match phones.get_mut(id) {
                 Some(phone) => {
                     let sid = phone.session.take();
+                    phone.session_kind.clear();
                     if let Some(sid) = sid {
                         let _ = phone.tx.send(Cmd::Send(json!({"t": "session.stop", "sid": sid})));
                     }
@@ -339,6 +342,7 @@ fn phone_json(phone: &Phone, paired: bool) -> Value {
         "muted": phone.muted,
         "paired": paired && phone.paired,
         "session": phone.session,
+        "sessionKind": phone.session_kind,
         "rtt": phone.rtt,
         "battery": phone.battery,
         "addr": phone.addr,
@@ -353,7 +357,7 @@ impl Inner {
         for paired in &store.list {
             match phones.get(&paired.id) {
                 Some(phone) => list.push(phone_json(phone, true)),
-                None => list.push(json!({"id": paired.id, "name": paired.name, "model": paired.model, "caps": [], "intent": "idle", "online": false, "muted": false, "paired": true, "session": null, "rtt": 0, "battery": -1, "addr": "", "lastSeen": paired.last_seen})),
+                None => list.push(json!({"id": paired.id, "name": paired.name, "model": paired.model, "caps": [], "intent": "idle", "online": false, "muted": false, "paired": true, "session": null, "sessionKind": "", "rtt": 0, "battery": -1, "addr": "", "lastSeen": paired.last_seen})),
             }
         }
         for phone in phones.values() {

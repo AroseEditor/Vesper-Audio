@@ -3,11 +3,13 @@ import { Engine } from './engine.js'
 import { h, $ } from './dom.js'
 import { Personal } from './personal.js'
 import { Diag } from './diag.js'
+import { Phones } from './phones.js'
 
 const api = window.vesper
 const engine = new Engine()
 let personal = null
 let diag = null
+let phones = null
 
 const PRESET_LABEL = { personal: 'Personal', clearcast: 'ClearCast' }
 const GATE_HINT = 'Silences your microphone while you are quieter than the threshold.'
@@ -34,6 +36,8 @@ const vacOut = () => state.devices.find(d => d.flow === 'render' && d.vac)
 const vacIn = () => state.devices.find(d => d.flow === 'capture' && d.vac)
 
 function currentInput() {
+  const phone = phones && phones.input()
+  if (phone) return phone
   const list = inputs()
   return list.find(d => d.id === state.settings.inputId) || list.find(d => d.isDefault) || list[0] || null
 }
@@ -57,6 +61,7 @@ function engineConfig() {
   const input = currentInput()
   return {
     inputName: input ? input.name : '',
+    input: input && input.phone ? { kind: 'phone', id: input.phoneId } : { kind: 'device', id: input ? input.id : '' },
     cableName: cableDevice() ? cableDevice().name : '',
     monitorName: monitorDevice() ? monitorDevice().name : '',
     gain: gainFor(input),
@@ -150,6 +155,7 @@ function setPage(name) {
   for (const el of document.querySelectorAll('.page')) el.classList.toggle('active', el.id === 'page-' + name)
   for (const el of document.querySelectorAll('.nav')) el.classList.toggle('active', el.dataset.page === name)
   if (name === 'properties' || name === 'home') refreshDevices()
+  if (name === 'display' && phones) phones.refresh().then(() => phones.newCode())
 }
 
 function dialog({ title, body, actions = [] }) {
@@ -191,7 +197,7 @@ function renderDevices() {
     sel.querySelector('[data-device-name]').textContent = cur ? cur.name : 'No input device found'
     menuItems(
       sel.querySelector('.menu'),
-      list.map(d => ({ value: d.id, label: d.name, tag: d.isDefault ? 'default' : '' })),
+      [...list.map(d => ({ value: d.id, label: d.name, tag: d.isDefault ? 'default' : '' })), ...(phones ? phones.entries() : [])],
       cur && cur.id,
       async id => {
         closeMenus()
@@ -301,6 +307,21 @@ function renderProps() {
     chips.replaceChildren(h('span', { class: 'chip', text: 'No input device detected' }))
     return
   }
+  if (d.phone) {
+    chips.replaceChildren(
+      ...[['Source', 'Phone over Wi-Fi'], ['Link', d.online ? 'connected' : 'waiting for the phone'], ['Muted on phone', d.muted ? 'yes' : 'no']].map(([k, v]) => h('span', { class: 'chip' }, k + ': ', h('b', { text: v })))
+    )
+    $('level').disabled = true
+    $('listen-on').disabled = true
+    $('sysfx-on').disabled = true
+    $('gain').value = gainFor(d)
+    $('gain-out').textContent = $('gain').value + '%'
+    fill($('gain'))
+    return
+  }
+  $('level').disabled = false
+  $('listen-on').disabled = false
+  $('sysfx-on').disabled = false
   const f = d.format
   const bits = []
   if (d.isDefault) bits.push(['Windows default', 'yes'])
@@ -811,13 +832,14 @@ function bindControls() {
     })
   }
   $('voice-enroll').addEventListener('click', () => personal.open())
+  $('add-phone').addEventListener('click', () => phones.openAdd())
 
   let levelTimer = null
   $('level').addEventListener('input', e => {
     fill(e.target)
     $('level-out').textContent = e.target.value + '%'
     const d = currentInput()
-    if (!d) return
+    if (!d || d.phone) return
     d.volume = Number(e.target.value)
     clearTimeout(levelTimer)
     levelTimer = setTimeout(() => api.invoke('device:volume', d.id, d.volume).catch(err => notice('props', { text: reason(err) })), 40)
@@ -832,7 +854,7 @@ function bindControls() {
   })
   $('listen-on').addEventListener('change', async e => {
     const d = currentInput()
-    if (!d) return
+    if (!d || d.phone) return
     try {
       await api.invoke('device:listen', d.id, e.target.checked)
       notice('props', null)
@@ -843,7 +865,7 @@ function bindControls() {
   })
   $('sysfx-on').addEventListener('change', async e => {
     const d = currentInput()
-    if (!d) return
+    if (!d || d.phone) return
     try {
       await api.invoke('device:sysfx', d.id, e.target.checked)
       notice('props', null)
@@ -893,6 +915,7 @@ async function boot() {
   state.settings = await api.invoke('settings:get')
   personal = new Personal({ api, engine, state, dialog, closeDialog, notice, save, sync, reason, renderAll })
   diag = new Diag({ api, engine, dialog, closeDialog, reason })
+  phones = new Phones({ api, engine, state, dialog, closeDialog, notice, save, sync, reason, renderAll })
   if (state.settings.speexDb > 0) await save({ speexDb: -state.settings.speexDb })
   bindMenus()
   bindControls()
@@ -906,10 +929,12 @@ async function boot() {
     state.update = s
     renderUpdate()
   })
-  if (state.info.testMode) window.__vesper = { engine, state, api, personal, installDriver, installOwnDriver, uninstallDriver, save, sync, refreshDevices, config: engineConfig }
+  if (state.info.testMode) window.__vesper = { engine, state, api, personal, phones, installDriver, installOwnDriver, uninstallDriver, save, sync, refreshDevices, config: engineConfig }
+  await phones.init()
   await refreshDevices()
   state.driver = await api.invoke('driver:status').catch(() => null)
   renderAll()
+  phones.render()
   sync()
   meters()
   navigator.mediaDevices.addEventListener('devicechange', async () => {

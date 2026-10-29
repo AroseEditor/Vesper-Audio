@@ -25,6 +25,8 @@ const copies = [
 
 fs.mkdirSync(out, { recursive: true })
 for (const [from, to] of copies) fs.copyFileSync(from, path.join(out, to))
+const qrSource = fs.readFileSync(nm('qrcode-generator', 'dist', 'qrcode.js'), 'utf8')
+fs.writeFileSync(path.join(out, 'qrcode.js'), ['const exports = {}', 'const module = { exports }', qrSource, 'export default qrcode', ''].join(String.fromCharCode(10)))
 
 const obsSpeex = `const FRAME=480,RING=FRAME*16;
 class ObsSpeex extends AudioWorkletProcessor{

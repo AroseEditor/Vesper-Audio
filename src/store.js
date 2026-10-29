@@ -27,6 +27,7 @@ const defaults = {
   boardVolume: 100,
   sounds: [],
   personal: null,
+  phoneName: '',
   driverVersion: null,
   setupDone: false
 }

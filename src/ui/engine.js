@@ -71,6 +71,7 @@ export class Engine {
     this.pending = null
     this.draining = null
     this.onSoundEnd = () => {}
+    this.phone = null
     this.stats = { underruns: 0, queued: 0, backlog: 0, target: PREBUFFER_HOPS * HOP, rebuffers: 0, drops: 0, skipped: 0, p50: 0, p95: 0, max: 0 }
     this.rungs = {}
     this.ladder = true
@@ -118,7 +119,7 @@ export class Engine {
       this.rungs = { personal: cfg.perfPersonal | 0, clearcast: cfg.perfClearcast | 0 }
       this.rungSeeded = true
     }
-    const key = [cfg.inputName, cfg.cableName].join('|')
+    const key = [cfg.inputName, cfg.cableName, cfg.input ? cfg.input.kind + ':' + cfg.input.id : ''].join('|')
     if (!this.ctx || key !== this.structKey) {
       await this.build(cfg)
       this.structKey = key
@@ -131,22 +132,35 @@ export class Engine {
 
   async build(cfg) {
     await this.teardown()
-    if (!cfg.inputName) throw new Error('No input device selected')
-    const inputId = await resolveDevice('audioinput', cfg.inputName)
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        deviceId: inputId ? { exact: inputId } : undefined,
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
-        channelCount: 1
-      }
-    })
+    const phone = Boolean(cfg.input && cfg.input.kind === 'phone')
+    if (!cfg.inputName && !phone) throw new Error('No input device selected')
+    let stream = null
+    if (!phone) {
+      const inputId = await resolveDevice('audioinput', cfg.inputName)
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          deviceId: inputId ? { exact: inputId } : undefined,
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          channelCount: 1
+        }
+      })
+    }
     const ctx = new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' })
-    await Promise.all(['./limit.worklet.js', './dynamics.worklet.js', './record.worklet.js', './denoise.worklet.js', './vendor/rnnoise.worklet.js', './vendor/speex.worklet.js'].map(f => ctx.audioWorklet.addModule(asset(f))))
+    await Promise.all(['./limit.worklet.js', './dynamics.worklet.js', './record.worklet.js', './phone.worklet.js', './denoise.worklet.js', './vendor/rnnoise.worklet.js', './vendor/speex.worklet.js'].map(f => ctx.audioWorklet.addModule(asset(f))))
     this.stream = stream
     this.ctx = ctx
-    this.src = ctx.createMediaStreamSource(stream)
+    if (phone) {
+      this.phone = new AudioWorkletNode(ctx, 'vesper-phone', { numberOfInputs: 0, numberOfOutputs: 1, outputChannelCount: [1] })
+      this.phone.port.onmessage = e => {
+        if (e.data.type === 'stats') this.stats.phone = { underruns: e.data.underruns, fillMs: e.data.fillMs, targetMs: e.data.targetMs, drops: e.data.drops }
+      }
+      this.src = this.phone
+    } else {
+      this.phone = null
+      this.src = ctx.createMediaStreamSource(stream)
+    }
     this.gain = ctx.createGain()
     this.fxIn = ctx.createGain()
     this.fxOut = ctx.createGain()
@@ -193,7 +207,7 @@ export class Engine {
     ctx.onstatechange = () => {
       if (ctx.state === 'suspended' || ctx.state === 'interrupted') ctx.resume().catch(() => {})
     }
-    for (const track of stream.getAudioTracks()) track.addEventListener('ended', () => this.recover('The microphone stopped, so Vesper Audio reconnected it.'))
+    if (stream) for (const track of stream.getAudioTracks()) track.addEventListener('ended', () => this.recover('The microphone stopped, so Vesper Audio reconnected it.'))
     this.state.running = true
     if (ctx.state === 'suspended') await ctx.resume()
     this.startHealth()
@@ -224,14 +238,16 @@ export class Engine {
     const ctx = this.ctx
     if (!ctx || this.recovering) return
     if (ctx.state === 'suspended' || ctx.state === 'interrupted') ctx.resume().catch(() => {})
-    const track = this.stream && this.stream.getAudioTracks()[0]
-    if (!track || track.readyState === 'ended') return this.recover('The microphone stopped, so Vesper Audio reconnected it.')
-    const input = this.rms(this.analyser)
-    this.frozen = input === 0 || track.muted ? this.frozen + 1 : 0
-    if (this.frozen >= FROZEN_CHECKS && Date.now() - this.lastFrozenFix > FROZEN_COOLDOWN_MS) {
-      this.frozen = 0
-      this.lastFrozenFix = Date.now()
-      return this.recover('The microphone went silent, so Vesper Audio reconnected it.')
+    if (this.stream) {
+      const track = this.stream.getAudioTracks()[0]
+      if (!track || track.readyState === 'ended') return this.recover('The microphone stopped, so Vesper Audio reconnected it.')
+      const input = this.rms(this.analyser)
+      this.frozen = input === 0 || track.muted ? this.frozen + 1 : 0
+      if (this.frozen >= FROZEN_CHECKS && Date.now() - this.lastFrozenFix > FROZEN_COOLDOWN_MS) {
+        this.frozen = 0
+        this.lastFrozenFix = Date.now()
+        return this.recover('The microphone went silent, so Vesper Audio reconnected it.')
+      }
     }
     if (this.active !== 'personal' && this.active !== 'clearcast') return
     const lost = this.stats.underruns - this.lastUnderruns
@@ -255,12 +271,21 @@ export class Engine {
   deviceChanged() {
     clearTimeout(this.deviceTimer)
     this.deviceTimer = setTimeout(async () => {
-      if (!this.ctx || !this.cfg || this.recovering) return
+      if (!this.ctx || !this.cfg || this.recovering || !this.stream) return
       const want = await resolveDevice('audioinput', this.cfg.inputName).catch(() => '')
       const track = this.stream && this.stream.getAudioTracks()[0]
       const have = track && track.getSettings().deviceId
       if (want && have && want !== have) this.recover('Audio devices changed, so Vesper Audio reconnected.')
     }, 1500)
+  }
+
+  pushPhone(message) {
+    if (!this.phone || !this.cfg || !this.cfg.input || this.cfg.input.id !== message.id) return
+    this.phone.port.postMessage({ type: 'pcm', pcm: message.pcm, lost: message.lost })
+  }
+
+  setPhoneMuted(on) {
+    if (this.phone) this.phone.port.postMessage({ type: 'mute', on: Boolean(on) })
   }
 
   async wasmBinary(name) {
@@ -632,6 +657,7 @@ export class Engine {
     this.analyser = null
     this.outAnalyser = null
     this.dither = null
+    this.phone = null
     this.mode = ''
     this.structKey = ''
     this.buffers.clear()

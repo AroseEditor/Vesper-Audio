@@ -36,6 +36,19 @@ h2 { font-size: 20px; font-weight: 600; margin: 0 0 12px; }
 .muted { color: var(--muted); }
 .lead { margin: -10px 0 16px; }
 .hint { color: var(--muted); font-size: 12.5px; margin: 10px 0 0; }
+.mono { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; word-break: break-all; }
+.qr-wrap { display: flex; align-items: center; gap: 16px; margin: 12px 0; }
+.qr { width: 200px; height: 200px; image-rendering: pixelated; background: #fff; border-radius: 12px; }
+.sas { font-size: 40px; font-weight: 700; letter-spacing: 0.2em; text-align: center; margin: 16px 0; font-variant-numeric: tabular-nums; }
+.phone-row { display: flex; align-items: center; gap: 14px; padding: 12px 0; border-top: 1px solid var(--line-soft); flex-wrap: wrap; }
+.phone-name { display: flex; flex-direction: column; min-width: 120px; }
+.phone-name small { color: var(--muted); }
+.phone-chips { display: flex; gap: 6px; flex-wrap: wrap; flex: 1; }
+.phone-actions { display: flex; gap: 8px; }
+.ico-box { display: inline-flex; color: var(--muted); }
+.chip.ok { color: var(--accent); }
+.chip.warn { color: #f0b429; }
+.card-title { margin: 0 0 6px; font-size: 15px; }
 [hidden] { display: none !important; }
 
 .titlebar {

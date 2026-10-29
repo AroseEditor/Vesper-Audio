@@ -1,6 +1,7 @@
 const fs = require('fs')
 const os = require('os')
 const path = require('path')
+const { spawn } = require('child_process')
 const { _electron } = require('playwright-core')
 
 const root = path.join(__dirname, '..')
@@ -189,6 +190,67 @@ async function dynamics(page) {
   await page.evaluate(() => window.__vesper.save({ gateOn: false, normOn: false }))
 }
 
+function fakePhonePath() {
+  if (process.env.VESPER_FAKEPHONE) return process.env.VESPER_FAKEPHONE
+  for (const dir of ['release', 'debug']) {
+    const file = path.join(root, 'core', 'target', dir, 'fakephone.exe')
+    if (fs.existsSync(file)) return file
+  }
+  return ''
+}
+
+async function phoneMic(page) {
+  const fake = fakePhonePath()
+  if (!fake) {
+    console.log('SKIP  phone microphone checks (build the core first: npm run core)')
+    return
+  }
+  await page.evaluate(() => window.__vesper.save({ ai: false, basic: false, gateOn: false, normOn: false }))
+  await page.evaluate(() => window.__vesper.sync())
+  const started = await page.evaluate(() => window.__vesper.api.invoke('link:call', 'link.start', {}).then(s => s.port))
+  check('link component starts and listens', started > 0, 'port ' + started)
+  const uri = await page.evaluate(() => window.__vesper.api.invoke('link:call', 'link.pairUri', {}).then(r => r.uri))
+  const local = uri.split('&').map(part => (part.startsWith('a=') ? 'a=127.0.0.1' : part)).join('&')
+  const dir = fs.mkdtempSync(path.join(work, 'phone-'))
+  const child = spawn(fake, ['--qr', local, '--dir', dir, '--name', 'Test Phone', '--id', 'test-phone', '--mode', 'mic', '--seconds', '14', '--mute-after', '9000'], { stdio: 'ignore', windowsHide: true })
+  const online = async () => page.evaluate(() => window.__vesper.phones.list.find(p => p.paired && p.online && p.intent === 'mic') || null)
+  let phone = null
+  for (let i = 0; i < 60 && !phone; i++) {
+    await new Promise(res => setTimeout(res, 250))
+    phone = await online()
+  }
+  check('a phone pairs with the QR code and appears', Boolean(phone), phone ? phone.name : 'none')
+  if (!phone) {
+    child.kill()
+    return
+  }
+  await page.evaluate(p => window.__vesper.phones.use(p), phone)
+  let level = 0
+  for (let i = 0; i < 24 && level < 0.5; i++) {
+    await new Promise(res => setTimeout(res, 250))
+    level = await page.evaluate(() => window.__vesper.engine.outLevel())
+  }
+  const info = await page.evaluate(() => ({ kind: window.__vesper.engine.cfg.input.kind, stats: window.__vesper.engine.stats.phone || null, sessions: window.__vesper.phones.list.map(p => p.session) }))
+  check('the phone becomes the microphone and its audio plays', info.kind === 'phone' && level > 0.5, `level ${level.toFixed(2)} ${JSON.stringify(info.stats)}`)
+  const poll = async (limit, fn) => {
+    for (let i = 0; i < limit * 4; i++) {
+      if (await page.evaluate(fn)) return true
+      await new Promise(res => setTimeout(res, 250))
+    }
+    return false
+  }
+  const sawMute = await poll(14, () => window.__vesper.phones.list.some(p => p.muted))
+  await new Promise(res => setTimeout(res, 700))
+  const muted = await page.evaluate(() => ({ muted: window.__vesper.phones.list.some(p => p.muted), level: window.__vesper.engine.outLevel() }))
+  check('muting on the phone shows on the PC and goes silent', sawMute && muted.level < 0.1, JSON.stringify(muted))
+  const left = await poll(20, () => !window.__vesper.phones.list.some(p => p.online))
+  await new Promise(res => setTimeout(res, 500))
+  const gone = await page.evaluate(() => ({ online: window.__vesper.phones.list.some(p => p.online), level: window.__vesper.engine.outLevel() }))
+  check('when the phone leaves, nothing is played and the default microphone is not used', left && gone.level < 0.1, JSON.stringify(gone))
+  child.kill()
+  await page.evaluate(() => window.__vesper.save({ inputId: '' }))
+}
+
 async function main() {
   const noiseWav = path.join(work, 'noise.wav')
   writeWav(noiseWav, noise(12, 0.08), 48000)
@@ -201,7 +263,7 @@ async function main() {
   let { app, page, errors } = await launch(userData, noiseWav, { VESPER_TEST_SOUNDS: toneWav })
   check('app boots and engine starts', true)
   const pages = await page.evaluate(() => [...document.querySelectorAll('.nav')].map(n => n.dataset.page))
-  check('four pages present', pages.join() === 'home,properties,board,settings', pages.join())
+  check('five pages present', pages.join() === 'home,properties,board,display,settings', pages.join())
   const devices = await page.evaluate(() => window.__vesper.api.invoke('devices:list'))
   check('windows endpoints detected', devices.length > 0, devices.length + ' endpoints')
 
@@ -222,6 +284,7 @@ async function main() {
   })
   check('cost ladder steps Personal down to the standard model and back', ladder.stepped.active === 'dfn3' && /standard model/.test(ladder.stepped.warning) && ladder.stepped.lowered && ladder.back === 'personal', JSON.stringify(ladder))
   await dynamics(page)
+  await phoneMic(page)
 
   await page.evaluate(() => window.__vesper.save({ ai: false, basic: false, closeToTray: true, boardVolume: 42, speexDb: -31, aiStrength: 55, basicPreset: 'speex' }))
   const sounds = await page.evaluate(() => window.__vesper.api.invoke('sounds:add'))

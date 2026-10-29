@@ -113,7 +113,7 @@ fn serve(inner: Arc<Inner>, tcp: TcpStream, peer: SocketAddr) -> io::Result<()> 
         }
         phones.insert(
             id.clone(),
-            Phone { id: id.clone(), name: name.clone(), model: model.clone(), caps, intent: "idle".into(), paired: known.is_some(), addr: peer.ip().to_string(), tx, session: None, rtt: 0, battery: -1, muted: false, conn },
+            Phone { id: id.clone(), name: name.clone(), model: model.clone(), caps, intent: "idle".into(), paired: known.is_some(), addr: peer.ip().to_string(), tx, session: None, session_kind: String::new(), rtt: 0, battery: -1, muted: false, conn },
         );
     }
     inner.emit_phones();

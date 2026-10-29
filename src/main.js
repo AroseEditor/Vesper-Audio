@@ -11,6 +11,8 @@ const driver = require('./driver')
 const models = require('./models')
 const updater = require('./updater')
 const trainer = require('./trainer')
+const core = require('./core')
+const apk = require('./apk')
 const { wavBuffer } = require('./wav')
 
 const REPO_URL = 'https://github.com/AroseEditor/Vesper-Audio'
@@ -206,6 +208,16 @@ function handleIpc() {
   })
   ipcMain.handle('app:repo', () => shell.openExternal(REPO_URL))
   ipcMain.handle('app:quit', quit)
+  ipcMain.handle('link:call', (_, method, params) => core.call(method, params))
+  ipcMain.handle('link:available', () => core.available())
+  ipcMain.handle('link:paired', () => core.hasPairedPhones())
+  ipcMain.handle('apk:start', () => apk.start())
+  ipcMain.handle('apk:stop', () => apk.stop())
+  ipcMain.handle('app:link', (_, url) => (String(url).startsWith(REPO_URL) ? shell.openExternal(String(url)) : null))
+  ipcMain.handle('link:retry', () => {
+    core.retry()
+    return core.ensure()
+  })
   ipcMain.handle('app:log', (_, line) => {
     if (testMode) console.log('[renderer]', line)
   })
@@ -214,6 +226,8 @@ function handleIpc() {
 app.on('second-instance', showWindow)
 app.on('before-quit', () => {
   quitting = true
+  core.stop()
+  apk.stop()
   store.flush()
 })
 app.on('window-all-closed', () => app.quit())
@@ -228,6 +242,15 @@ app.whenReady().then(() => {
   session.defaultSession.setPermissionRequestHandler((_, permission, cb) => cb(permission === 'media'))
   session.defaultSession.setPermissionCheckHandler((_, permission) => permission === 'media')
   handleIpc()
+  const toWindow = (channel, payload) => win && !win.isDestroyed() && win.webContents.send(channel, payload)
+  core.on({
+    event: (name, data) => {
+      if (name === 'pcm') toWindow('link:pcm', { id: data.id, sid: data.sid, seq: data.seq, lost: data.lost, pcm: Buffer.from(data.b64, 'base64') })
+      else toWindow('link:event', { event: name, data })
+    },
+    failed: message => toWindow('link:failed', message)
+  })
+  if (core.hasPairedPhones() || String(store.get().inputId || '').startsWith('phone:')) core.ensure().catch(() => {})
   applyLogin()
   createWindow()
   createTray()
