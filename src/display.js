@@ -2,7 +2,7 @@ const fs = require('fs')
 const os = require('os')
 const path = require('path')
 const crypto = require('crypto')
-const { execFile } = require('child_process')
+const { execFile, execFileSync } = require('child_process')
 const { Readable } = require('stream')
 const { pipeline } = require('stream/promises')
 const winaudio = require('./winaudio')
@@ -77,4 +77,26 @@ async function uninstall() {
   return status()
 }
 
-module.exports = { status, monitors, install, uninstall }
+let queue = Promise.resolve()
+
+function serial(task) {
+  const next = queue.then(task, task)
+  queue = next.catch(() => {})
+  return next
+}
+
+function attach(width, height, rate) {
+  return serial(() => winaudio.vddAttach(width, height, rate))
+}
+
+function detach() {
+  return serial(() => winaudio.vddDetach())
+}
+
+function detachNow() {
+  try {
+    execFileSync(winaudio.helperPath(), ['vdd-detach'], { windowsHide: true, timeout: 8000 })
+  } catch {}
+}
+
+module.exports = { status, monitors, install, uninstall, attach, detach, detachNow }

@@ -350,22 +350,23 @@ export class Phones {
     await this.refreshSystem()
   }
 
-  virtualMonitor() {
-    return ((this.vdd && this.vdd.monitors) || []).find(m => m.virtual) || null
-  }
-
   async startDisplay(phone) {
     const q = QUALITY[this.state.settings.displayQuality] || QUALITY.low
-    const virtual = this.virtualMonitor()
     let monitor = ''
-    if (virtual) {
-      await this.api.invoke('display:mode', virtual.device, q.w, q.h, q.fps).catch(() => {})
-      monitor = virtual.device
+    let warning = null
+    if (this.vdd && this.vdd.running) {
+      try {
+        const attached = await this.api.invoke('display:attach', q.w, q.h, q.fps)
+        monitor = attached.device || ''
+      } catch (err) {
+        warning = { text: 'The virtual display could not be turned on, so your phone shows your main screen instead. ' + this.reason(err) }
+      }
     }
     try {
       await this.call('link.session.start', { id: phone.id, kind: 'display', video: { w: q.w, h: q.h, fps: q.fps, kbps: q.kbps, idrMs: 2000, monitor } })
-      this.notice('display', null)
+      this.notice('display', warning)
     } catch (err) {
+      await this.api.invoke('display:detach').catch(() => {})
       this.notice('display', { text: this.reason(err) })
     }
   }
@@ -378,7 +379,7 @@ export class Phones {
     const v = this.vdd
     if (this.vddBusy) return this.vddBusy
     if (!v) return 'Checking the virtual display driver'
-    if (v.running) return 'Virtual display driver installed. Your phone can be an extra monitor.'
+    if (v.running) return 'Virtual display driver installed. The extra monitor turns on only while your phone uses it and off again afterwards.'
     if (v.nodePresent) return `Virtual display driver installed but Windows could not start it (code ${v.problem}).`
     return 'Virtual display driver not installed. Without it your phone mirrors your main screen.'
   }

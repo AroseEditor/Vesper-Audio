@@ -81,6 +81,8 @@ module.exports = {
   vddStatus: () => run(['vdd-status']),
   vddInstall: dir => runElevated(['vdd-install', dir]),
   vddUninstall: () => runElevated(['vdd-uninstall']),
+  vddAttach: (width, height, rate) => run(['vdd-attach', String(width), String(height), String(rate || 60)], 40000),
+  vddDetach: () => run(['vdd-detach'], 40000),
   vddMode: (device, width, height, rate) => run(['vdd-mode', device, String(width), String(height), String(rate || 0)]).catch(() => runElevated(['vdd-mode', device, String(width), String(height), String(rate || 0)])),
   firewallStatus: programs => run(['firewall-status', ...programs]),
   firewallAdd: programs => runElevated(['firewall-add', ...programs]),

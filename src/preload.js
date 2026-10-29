@@ -43,6 +43,8 @@ const invokes = new Set([
   'display:install',
   'display:uninstall',
   'display:mode',
+  'display:attach',
+  'display:detach',
   'firewall:status',
   'firewall:allow',
   'apk:stop',

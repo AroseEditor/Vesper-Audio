@@ -217,6 +217,16 @@ function handleIpc() {
   ipcMain.handle('display:monitors', () => vdd.monitors())
   ipcMain.handle('display:install', () => vdd.install(p => win && !win.isDestroyed() && win.webContents.send('display:progress', p)))
   ipcMain.handle('display:uninstall', () => vdd.uninstall())
+  ipcMain.handle('display:attach', async (_, width, height, rate) => {
+    if (testMode) return { ok: true, device: '' }
+    const result = await vdd.attach(Number(width), Number(height), Number(rate) || 60)
+    displayHeld = true
+    displaySeen = false
+    clearTimeout(displayTimer)
+    displayTimer = setTimeout(releaseDisplay, 25000)
+    return result
+  })
+  ipcMain.handle('display:detach', () => releaseDisplay())
   ipcMain.handle('display:mode', (_, device, width, height, rate) => winaudio.vddMode(String(device), Number(width), Number(height), Number(rate) || 0))
   ipcMain.handle('firewall:status', () => winaudio.firewallStatus(core.programs()).catch(() => ({ ok: false, allowed: false })))
   ipcMain.handle('firewall:allow', () => winaudio.firewallAdd(core.programs()))
@@ -231,9 +241,37 @@ function handleIpc() {
   })
 }
 
+let displayHeld = false
+let displaySeen = false
+let displayTimer = null
+
+function releaseDisplay() {
+  clearTimeout(displayTimer)
+  if (!displayHeld) return Promise.resolve()
+  displayHeld = false
+  displaySeen = false
+  return vdd.detach().catch(() => {})
+}
+
+function watchDisplay(name, data) {
+  if (!displayHeld) return
+  if (name === 'phones') {
+    const live = Array.isArray(data) && data.some(p => p.online && p.sessionKind === 'display')
+    if (live) {
+      displaySeen = true
+      clearTimeout(displayTimer)
+    } else if (displaySeen) {
+      releaseDisplay()
+    }
+  } else if (name === 'display' && data && data.state === 'error') {
+    releaseDisplay()
+  }
+}
+
 app.on('second-instance', showWindow)
 app.on('before-quit', () => {
   quitting = true
+  if (displayHeld) vdd.detachNow()
   core.stop()
   apk.stop()
   store.flush()
@@ -253,11 +291,16 @@ app.whenReady().then(() => {
   const toWindow = (channel, payload) => win && !win.isDestroyed() && win.webContents.send(channel, payload)
   core.on({
     event: (name, data) => {
+      watchDisplay(name, data)
       if (name === 'pcm') toWindow('link:pcm', { id: data.id, sid: data.sid, seq: data.seq, lost: data.lost, pcm: Buffer.from(data.b64, 'base64') })
       else toWindow('link:event', { event: name, data })
     },
-    failed: message => toWindow('link:failed', message)
+    failed: message => {
+      releaseDisplay()
+      toWindow('link:failed', message)
+    }
   })
+  if (!testMode) vdd.detach().catch(() => {})
   if (core.hasPairedPhones() || String(store.get().inputId || '').startsWith('phone:')) core.ensure().catch(() => {})
   applyLogin()
   createWindow()
