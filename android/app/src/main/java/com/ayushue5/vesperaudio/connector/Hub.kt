@@ -3,7 +3,10 @@ package com.ayushue5.vesperaudio.connector
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import java.net.InetAddress
 import java.util.concurrent.CopyOnWriteArrayList
+
+class DisplayRequest(val host: InetAddress, val port: Int, val sid: Int, val key: ByteArray, val salt: ByteArray, val width: Int, val height: Int)
 
 object Hub {
     enum class Phase { IDLE, CONNECTING, CONNECTED, RECONNECTING }
@@ -15,6 +18,9 @@ object Hub {
     @Volatile var micLive = false
     @Volatile var muted = false
     @Volatile var rtt = -1L
+    @Volatile var display: DisplayRequest? = null
+    @Volatile var videoFps = 0
+    @Volatile var micWanted = false
 
     private val ui = Handler(Looper.getMainLooper())
     private val listeners = CopyOnWriteArrayList<Runnable>()

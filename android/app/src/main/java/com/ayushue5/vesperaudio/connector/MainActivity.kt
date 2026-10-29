@@ -33,6 +33,7 @@ class MainActivity : Activity() {
     private lateinit var detail: TextView
     private lateinit var scan: Button
     private lateinit var mic: Button
+    private lateinit var monitor: Button
     private lateinit var mute: Button
     private lateinit var micState: TextView
     private lateinit var disconnect: Button
@@ -96,6 +97,8 @@ class MainActivity : Activity() {
         column.addView(scan)
         mic = button("Use as PC microphone", false) { toggleMic() }
         column.addView(mic)
+        monitor = button("Use as second monitor", false) { openMonitor() }
+        column.addView(monitor)
         micState = label(14f, muted)
         micState.setPadding(0, dp(8), 0, 0)
         column.addView(micState)
@@ -214,6 +217,14 @@ class MainActivity : Activity() {
             return
         }
         startMic()
+    }
+
+    private fun openMonitor() {
+        if (!prefs.hasPc() && !Hub.client(this).isRunning()) {
+            Toast.makeText(this, "Pair with your PC first.", Toast.LENGTH_LONG).show()
+            return
+        }
+        startActivity(Intent(this, DisplayActivity::class.java))
     }
 
     private fun startMic() {

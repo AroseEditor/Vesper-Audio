@@ -42,6 +42,13 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".DisplayActivity"
+            android:exported="false"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:launchMode="singleTop" />
+
         <service
             android:name=".LinkService"
             android:exported="false"

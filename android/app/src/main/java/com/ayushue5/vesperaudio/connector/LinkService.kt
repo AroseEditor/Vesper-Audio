@@ -72,6 +72,7 @@ class LinkService : Service() {
         }
         val prefs = Prefs(this)
         prefs.wasActive = true
+        Hub.micWanted = true
         val client = Hub.client(this)
         client.intent = "mic"
         if (!client.isRunning()) {
@@ -84,6 +85,7 @@ class LinkService : Service() {
 
     private fun stopWork() {
         Prefs(this).wasActive = false
+        Hub.micWanted = false
         Hub.client(this).intent = "idle"
         release()
         stopForeground(STOP_FOREGROUND_REMOVE)

@@ -180,7 +180,7 @@ class LinkClient(private val app: Context) {
         send(
             JSONObject().put("t", "hello").put("v", 1).put("id", prefs.deviceId).put("name", prefs.deviceName)
                 .put("model", Build.MANUFACTURER + " " + Build.MODEL).put("api", Build.VERSION.SDK_INT)
-                .put("caps", JSONArray().put("mic")).put("w", metrics.widthPixels).put("h", metrics.heightPixels).put("rate", 60)
+                .put("caps", JSONArray().put("mic").put("display")).put("w", metrics.widthPixels).put("h", metrics.heightPixels).put("rate", 60)
         )
         val welcome = waitFrame(frames, input, 10000)
         if (welcome.optString("t") != "welcome") throw IOException("Unexpected answer from the PC.")
@@ -254,6 +254,7 @@ class LinkClient(private val app: Context) {
                             mic?.stop()
                             mic = null
                             Hub.micLive = false
+                            Hub.display = null
                             Hub.changed()
                         }
                         "error" -> {
@@ -268,6 +269,7 @@ class LinkClient(private val app: Context) {
             mic?.stop()
             mic = null
             Hub.micLive = false
+            Hub.display = null
             try {
                 ssl.close()
             } catch (_: Exception) {
@@ -277,6 +279,20 @@ class LinkClient(private val app: Context) {
     }
 
     private fun startSession(message: JSONObject, ssl: SSLSocket) {
+        if (message.optString("kind") == "display") {
+            val video = message.optJSONObject("video")
+            Hub.display = DisplayRequest(
+                ssl.inetAddress,
+                message.optInt("udp"),
+                message.optLong("sid").toInt(),
+                Wire.unb64(message.optString("key")),
+                Wire.unb64(message.optString("salt")),
+                video?.optInt("w", 1280) ?: 1280,
+                video?.optInt("h", 720) ?: 720
+            )
+            Hub.changed()
+            return
+        }
         if (message.optString("kind") != "mic") return
         mic?.stop()
         val sender = MicSender(
