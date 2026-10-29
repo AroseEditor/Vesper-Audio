@@ -1,6 +1,6 @@
 [package]
 name = "vesper-core"
-version = "2.0.0"
+version = "2.0.1"
 edition = "2021"
 
 [lib]
@@ -44,6 +44,12 @@ features = [
   "Win32_UI_WindowsAndMessaging",
   "Win32_UI_HiDpi",
   "Win32_System_Threading",
+  "Devices_Bluetooth",
+  "Devices_Bluetooth_Rfcomm",
+  "Networking_Sockets",
+  "Storage_Streams",
+  "Foundation",
+  "Foundation_Collections",
 ]
 
 [[bin]]

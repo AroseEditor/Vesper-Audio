@@ -69,7 +69,7 @@ impl ClientCertVerifier for AcceptAnyClient {
 pub fn server_config(id: &Identity) -> Result<Arc<ServerConfig>, Error> {
     let provider = provider();
     let mut config = ServerConfig::builder_with_provider(provider.clone())
-        .with_protocol_versions(&[&rustls::version::TLS13])?
+        .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])?
         .with_client_cert_verifier(Arc::new(AcceptAnyClient(provider)))
         .with_single_cert(vec![CertificateDer::from(id.cert.clone())], PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(id.key.clone())))?;
     config.alpn_protocols = vec![super::proto::ALPN.to_vec()];

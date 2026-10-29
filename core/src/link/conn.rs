@@ -8,7 +8,13 @@ pub(super) fn accept_loop(inner: Arc<Inner>, listener: TcpListener) {
             Ok((stream, peer)) => {
                 let inner = inner.clone();
                 thread::spawn(move || {
-                    let _ = serve(inner, stream, peer);
+                    let registered = Arc::new(AtomicBool::new(false));
+                    let result = serve(inner.clone(), stream, peer, registered.clone());
+                    if let Err(e) = result {
+                        if !registered.load(Ordering::SeqCst) {
+                            (inner.emit)("attempt", json!({"addr": peer.ip().to_string(), "ok": false, "message": e.to_string()}));
+                        }
+                    }
                 });
             }
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => thread::sleep(Duration::from_millis(50)),
@@ -36,7 +42,7 @@ fn text(value: &Value, key: &str, limit: usize) -> String {
     value.get(key).and_then(|v| v.as_str()).unwrap_or("").chars().take(limit).collect()
 }
 
-fn token_ok(inner: &Inner, given: &str) -> bool {
+pub(super) fn token_ok(inner: &Inner, given: &str) -> bool {
     let supplied = match unb64(given) {
         Some(v) if v.len() == 16 => v,
         _ => return false,
@@ -59,7 +65,7 @@ fn token_ok(inner: &Inner, given: &str) -> bool {
     }
 }
 
-fn serve(inner: Arc<Inner>, tcp: TcpStream, peer: SocketAddr) -> io::Result<()> {
+fn serve(inner: Arc<Inner>, tcp: TcpStream, peer: SocketAddr, registered: Arc<AtomicBool>) -> io::Result<()> {
     tcp.set_nonblocking(false)?;
     tcp.set_nodelay(true)?;
     tcp.set_read_timeout(Some(Duration::from_millis(20)))?;
@@ -116,6 +122,8 @@ fn serve(inner: Arc<Inner>, tcp: TcpStream, peer: SocketAddr) -> io::Result<()> 
             Phone { id: id.clone(), name: name.clone(), model: model.clone(), caps, intent: "idle".into(), paired: known.is_some(), addr: peer.ip().to_string(), tx, session: None, session_kind: String::new(), rtt: 0, battery: -1, muted: false, conn },
         );
     }
+    registered.store(true, Ordering::SeqCst);
+    (inner.emit)("attempt", json!({"addr": peer.ip().to_string(), "ok": true, "message": ""}));
     inner.emit_phones();
     let result = run(&inner, &mut stream, &mut reader, &rx, &id, &name, &model, &fp, &fp_hex, &server_nonce, known.is_some());
     {

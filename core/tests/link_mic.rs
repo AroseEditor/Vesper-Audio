@@ -182,3 +182,24 @@ fn the_screen_reaches_the_phone_as_valid_h264() {
     let size = std::fs::metadata(&dump).map(|m| m.len()).unwrap_or(0);
     assert_eq!(size, report.video_bytes);
 }
+
+#[test]
+fn bluetooth_pairing_lets_the_phone_join_over_wifi_as_a_known_phone() {
+    let (link, _events, _dir) = start("bt");
+    let phone_dir = temp("bt-phone");
+    let identity = vesper_core::link::tls::load_or_create(&phone_dir, "fakephone").unwrap();
+    let uri = link.pair_uri();
+    let token = uri.split('&').find(|p| p.starts_with("t=")).unwrap()[2..].to_string();
+    let hello = serde_json::json!({"t": "bt.hello", "token": token, "id": "test-phone-1", "name": "Bluetooth Phone", "model": "Test", "fp": vesper_core::link::proto::hex(&identity.fp)});
+    let reply = link.bluetooth_message(&hello).unwrap();
+    assert_eq!(reply["ok"], true, "{}", reply);
+    assert_eq!(reply["port"].as_u64().unwrap(), link.port() as u64);
+    assert_eq!(reply["fp"].as_str().unwrap(), vesper_core::link::proto::hex(&link.fingerprint()));
+    let again = link.bluetooth_message(&hello).unwrap();
+    assert_eq!(again["ok"], false, "a Bluetooth token must work only once");
+    let addr = format!("127.0.0.1:{}", link.port());
+    let report = run(opts(phone_dir, None, Some(addr), 1, 0.0));
+    assert!(report.error.is_none(), "{:?}", report.error);
+    assert!(report.known && report.paired, "the phone paired over Bluetooth must be known over Wi-Fi: {:?}", report);
+    link.stop();
+}

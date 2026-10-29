@@ -1,3 +1,5 @@
+#[cfg(windows)]
+mod bluetooth;
 pub mod media;
 pub mod proto;
 pub mod store;
@@ -81,6 +83,7 @@ struct Inner {
     next_sid: AtomicU32,
     next_conn: AtomicU32,
     mdns: Mutex<Option<ServiceDaemon>>,
+    bluetooth: Mutex<Option<String>>,
 }
 
 #[derive(Clone)]
@@ -179,13 +182,20 @@ impl Link {
             next_sid: AtomicU32::new(1),
             next_conn: AtomicU32::new(1),
             mdns: Mutex::new(None),
+            bluetooth: Mutex::new(None),
         });
         *inner.mdns.lock().unwrap() = advertise(&config.name, &pc_id, &identity.fp, port);
         let accept = inner.clone();
         thread::spawn(move || accept_loop(accept, listener));
         let media = inner.clone();
         thread::spawn(move || udp_loop(media, udp_recv));
-        Ok(Link { inner })
+        let link = Link { inner };
+        #[cfg(windows)]
+        {
+            let mac = bluetooth::start(link.clone());
+            *link.inner.bluetooth.lock().unwrap() = mac;
+        }
+        Ok(link)
     }
 
     pub fn stop(&self) {
@@ -197,6 +207,14 @@ impl Link {
         for phone in phones.values() {
             let _ = phone.tx.send(Cmd::Close);
         }
+    }
+
+    pub fn is_stopped(&self) -> bool {
+        self.inner.stop.load(Ordering::SeqCst)
+    }
+
+    pub fn bluetooth_address(&self) -> Option<String> {
+        self.inner.bluetooth.lock().unwrap().clone()
     }
 
     pub fn port(&self) -> u16 {
@@ -219,6 +237,7 @@ impl Link {
             "id": self.inner.pc_id,
             "name": self.inner.name,
             "fp": hex(&self.inner.identity.fp),
+            "bluetooth": self.bluetooth_address(),
             "ips": local_ips().iter().map(|ip| ip.to_string()).collect::<Vec<_>>(),
         })
     }
@@ -228,14 +247,55 @@ impl Link {
         rand::thread_rng().fill_bytes(&mut token);
         *self.inner.pairing.lock().unwrap() = Some(Pairing { token, expires: Instant::now() + TOKEN_TTL, used: false });
         let ips: Vec<String> = local_ips().iter().map(|ip| ip.to_string()).collect();
+        let bluetooth = self.bluetooth_address().map(|mac| format!("&b={}", mac)).unwrap_or_default();
         format!(
-            "vesper://pair?v=1&a={}&p={}&f={}&t={}&n={}",
+            "vesper://pair?v=1&a={}&p={}&f={}&t={}&n={}{}",
             ips.join(","),
             self.inner.port,
             b64(&self.inner.identity.fp),
             b64(&token),
-            urlenc(&self.inner.name)
+            urlenc(&self.inner.name),
+            bluetooth
         )
+    }
+
+    pub fn bluetooth_message(&self, message: &Value) -> Option<Value> {
+        match message.get("t").and_then(|v| v.as_str()).unwrap_or("") {
+            "bt.hello" => Some(self.bluetooth_hello(message)),
+            "bt.status" => {
+                (self.inner.emit)("bluetooth", json!({"state": "status", "ok": message.get("ok").and_then(|v| v.as_bool()).unwrap_or(false), "message": message.get("message").and_then(|v| v.as_str()).unwrap_or("")}));
+                None
+            }
+            _ => None,
+        }
+    }
+
+    pub fn bluetooth_hello(&self, message: &Value) -> Value {
+        let field = |key: &str, limit: usize| -> String { message.get(key).and_then(|v| v.as_str()).unwrap_or("").chars().take(limit).collect() };
+        let token = field("token", 64);
+        let id = field("id", 64);
+        let fp = field("fp", 64);
+        let valid_fp = fp.len() == 64 && fp.chars().all(|c| c.is_ascii_hexdigit());
+        if id.is_empty() || !valid_fp {
+            return json!({"t": "bt.welcome", "ok": false, "reason": "The phone sent an incomplete request."});
+        }
+        if !conn::token_ok(&self.inner, &token) {
+            return json!({"t": "bt.welcome", "ok": false, "reason": "The QR code expired or was already used. Show a new one on the PC."});
+        }
+        let name = field("name", 64);
+        let model = field("model", 64);
+        self.inner.store.lock().unwrap().upsert(Paired { id: id.clone(), name: name.clone(), model, fp: fp.to_lowercase(), last_seen: now_ms() });
+        self.inner.emit_phones();
+        (self.inner.emit)("bluetooth", json!({"state": "paired", "id": id, "name": name}));
+        json!({
+            "t": "bt.welcome",
+            "ok": true,
+            "name": self.inner.name,
+            "id": self.inner.pc_id,
+            "ips": local_ips().iter().map(|ip| ip.to_string()).collect::<Vec<_>>(),
+            "port": self.inner.port,
+            "fp": hex(&self.inner.identity.fp),
+        })
     }
 
     pub fn phones(&self) -> Value {
