@@ -62,7 +62,7 @@ Short-code path (mDNS or manual address, no QR code):
 
 A known phone (certificate fingerprint already stored) is welcomed with `known` true and needs no pairing. Forgetting a phone on the PC deletes its fingerprint.
 
-Heartbeat: the phone sends `ping` every second. The PC ends a session when no `ping` was seen for 3 seconds.
+Heartbeat: the phone sends `ping` every second. The PC drops the connection and ends its session when no `ping` was seen for 6 seconds.
 
 ## UDP media
 
