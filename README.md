@@ -34,33 +34,49 @@
 
 ## Contents
 
-1. [What's new in 2.0.1](#whats-new-in-201)
-2. [What's new in 2.0.0](#whats-new-in-200)
-3. [What it is](#what-it-is)
-4. [Screens](#screens)
-5. [Install and updates](#install-and-updates)
-6. [Quick start](#quick-start)
-7. [Vesper Audio Connector (Android)](#vesper-audio-connector-android)
-8. [Phone microphone](#phone-microphone)
-9. [Second monitor](#second-monitor)
-10. [Vesper Link: pairing, security and the network](#vesper-link-pairing-security-and-the-network)
-11. [Features](#features)
-12. [Noise cancellation modes](#noise-cancellation-modes)
-13. [Noise gate and loudness normalization](#noise-gate-and-loudness-normalization)
-14. [Train your voice model](#train-your-voice-model)
-15. [Latency and performance on low-end PCs](#latency-and-performance-on-low-end-pcs)
-16. [Reliable audio and diagnostics](#reliable-audio-and-diagnostics)
-17. [Vesper Audio Cable](#vesper-audio-cable)
-18. [Real Windows properties](#real-windows-properties)
-19. [Tests and benchmarks](#tests-and-benchmarks)
-20. [Architecture](#architecture)
-21. [Build from source](#build-from-source)
-22. [CI and releases](#ci-and-releases)
-23. [Data and privacy](#data-and-privacy)
-24. [Troubleshooting](#troubleshooting)
-25. [Honest limits](#honest-limits)
-26. [Repository layout](#repository-layout)
-27. [Licenses and credits](#licenses-and-credits)
+1. [What's new in 2.0.2](#whats-new-in-202)
+2. [What's new in 2.0.1](#whats-new-in-201)
+3. [What's new in 2.0.0](#whats-new-in-200)
+4. [What it is](#what-it-is)
+5. [Screens](#screens)
+6. [Install and updates](#install-and-updates)
+7. [Quick start](#quick-start)
+8. [Vesper Audio Connector (Android)](#vesper-audio-connector-android)
+9. [Phone microphone](#phone-microphone)
+10. [Second monitor](#second-monitor)
+11. [Vesper Link: pairing, security and the network](#vesper-link-pairing-security-and-the-network)
+12. [Features](#features)
+13. [Noise cancellation modes](#noise-cancellation-modes)
+14. [Noise gate and loudness normalization](#noise-gate-and-loudness-normalization)
+15. [Train your voice model](#train-your-voice-model)
+16. [Latency and performance on low-end PCs](#latency-and-performance-on-low-end-pcs)
+17. [Reliable audio and diagnostics](#reliable-audio-and-diagnostics)
+18. [Vesper Audio Cable](#vesper-audio-cable)
+19. [Real Windows properties](#real-windows-properties)
+20. [Tests and benchmarks](#tests-and-benchmarks)
+21. [Architecture](#architecture)
+22. [Build from source](#build-from-source)
+23. [CI and releases](#ci-and-releases)
+24. [Data and privacy](#data-and-privacy)
+25. [Troubleshooting](#troubleshooting)
+26. [Honest limits](#honest-limits)
+27. [Repository layout](#repository-layout)
+28. [Licenses and credits](#licenses-and-credits)
+
+---
+
+## What's new in 2.0.2
+
+Version 2.0.2 fixes the secure connection being cut during the handshake. 2.0.1 got the phone as far as the PC (the firewall rule worked), but the phone then dropped out of the TLS handshake and the PC showed **unexpected end of file**.
+
+| Fix | What changed |
+| --- | --- |
+| **Phone signing key** | Android hardware keys only sign the way TLS needs when they are created with the `NONE` digest allowed. The Connector's key was created with SHA-256 only, which is the most likely reason the handshake was aborted on the phone. The Connector now creates a new key with `NONE`, SHA-256, SHA-384 and SHA-512 allowed and removes the old one. The first connection after updating makes a new phone identity, so pair again by scanning the code. |
+| **Key check in the log** | The Connector tests the key at the start of every connection and prints **Key check: signing works** or the exact reason it failed. |
+| **Right address first** | The PC now lists the address of the network it actually uses to reach the LAN first, and the phone only tries addresses on its own Wi-Fi subnet. Addresses of virtual adapters (Hyper-V, WSL, VirtualBox) were being tried and each one cost 3 seconds. Nothing is forwarded, the phone simply no longer tries addresses it cannot reach. |
+| **Honest errors** | The phone keeps the real handshake error instead of replacing it with the timeout from the last address, and shows the reason and cause. The PC says **the phone closed the connection during the secure handshake** instead of a bare end of file. |
+
+The handshake was reproduced against the PC with an Android-equivalent TLS library (Conscrypt) using an ordinary key, including a deliberately slow client, and it succeeds on TLS 1.3 and TLS 1.2. So the PC side is cleared and the key restriction is the best explanation, but it has not been confirmed on a phone. If the log still shows an error after updating, the text under the status line says what it is.
 
 ---
 
@@ -596,8 +612,8 @@ The fallback audio driver needs the Windows Driver Kit and Visual Studio 2022. I
 | `publish` | One GitHub release with all assets. A tag with a dash (for example `v2.1.0-rc.1`) is published as a pre-release |
 
 ```powershell
-git tag v2.0.1
-git push origin v2.0.1
+git tag v2.0.2
+git push origin v2.0.2
 ```
 
 Repository secrets used by the `android` job: `ANDROID_KEYSTORE_B64` (the base64 of the keystore), `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`. Keep an offline backup of the keystore: without it the app can no longer be updated over an installed copy. Manual runs (`workflow_dispatch`) take `target` (`all`, `driver`, `app`, `android`) and `publish` (default false), so a build can be checked without releasing.
@@ -629,6 +645,7 @@ On the phone, the pairing key lives in the Android Keystore and the paired PC (a
 | Symptom | Cause and fix |
 | --- | --- |
 | The phone keeps saying Reconnecting, or cannot reach the PC | Almost always Windows Firewall. Open Vesper Audio, press **Allow** when it asks (or **Settings, Allow in Windows Firewall**), then scan a fresh code. Both must be on the same Wi-Fi (not a guest network that isolates devices). The log under the status line on the phone shows the address and the reason of each failed try. Typing the PC address under **Connect by address** works when discovery is blocked. |
+| The phone says the secure connection failed | The text in brackets says why. Update the Connector to 2.0.2 and scan a fresh code (the phone makes a new identity once). The line **Key check** in the phone log must say **signing works**. If it says signing failed, send that line. |
 | Bluetooth did not work when pairing | The log on the phone says why. Turn Bluetooth on at the PC and the phone, allow Nearby devices, and keep the phone near the PC. If it fails the phone continues over Wi-Fi by itself, so pairing can still work. A PC without Bluetooth just uses Wi-Fi. |
 | The QR code is refused | It works once and for two minutes. Press **New code**. |
 | The six-digit codes differ | Press Cancel on both and start again. Do not pair unless they match. |
