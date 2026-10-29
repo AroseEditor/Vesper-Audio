@@ -33,6 +33,7 @@ class LinkClient(private val app: Context) {
     @Volatile private var socket: SSLSocket? = null
     @Volatile private var mic: MicSender? = null
     private val confirm = LinkedBlockingQueue<Boolean>()
+    @Volatile private var wifiPrefixes: List<Pair<ByteArray, Int>> = emptyList()
 
     @Volatile var intent = "idle"
 
@@ -99,10 +100,38 @@ class LinkClient(private val app: Context) {
                 val capabilities = manager.getNetworkCapabilities(network) ?: continue
                 if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
                     manager.bindProcessToNetwork(network)
+                    wifiPrefixes = manager.getLinkProperties(network)?.linkAddresses?.mapNotNull {
+                        val bytes = it.address.address
+                        if (bytes.size == 4) Pair(bytes, it.prefixLength) else null
+                    } ?: emptyList()
                     return
                 }
             }
         } catch (_: Exception) {
+        }
+    }
+
+    private fun sameSubnet(ip: String): Boolean {
+        val bytes = try {
+            java.net.InetAddress.getByName(ip).address
+        } catch (_: Exception) {
+            return false
+        }
+        if (bytes.size != 4) return false
+        return wifiPrefixes.any { (mine, bits) ->
+            var left = bits
+            var index = 0
+            var same = true
+            while (left > 0 && index < 4) {
+                val mask = if (left >= 8) 0xFF else (0xFF shl (8 - left)) and 0xFF
+                if ((bytes[index].toInt() and mask) != (mine[index].toInt() and mask)) {
+                    same = false
+                    break
+                }
+                left -= 8
+                index++
+            }
+            same
         }
     }
 
@@ -116,8 +145,8 @@ class LinkClient(private val app: Context) {
         is PairException -> error.message ?: "Pairing failed."
         is SocketTimeoutException, is ConnectException, is UnknownHostException -> "Could not reach the PC (" + (error.message ?: "no answer") + "). Check it is on the same Wi-Fi, that Vesper Audio is open, and press Allow in Windows Firewall on the PC."
         is CertificateException -> "This is not the PC you scanned. Scan the code again."
-        is SSLHandshakeException -> "The secure connection to the PC failed. Scan the pairing code again."
-        is SSLException -> "The secure connection to the PC failed."
+        is SSLHandshakeException -> "The secure connection to the PC failed (" + (error.message ?: "no details") + "). Scan the pairing code again."
+        is SSLException -> "The secure connection to the PC failed (" + (error.message ?: "no details") + ")."
         else -> error.message ?: error.javaClass.simpleName
     }
 
@@ -127,6 +156,7 @@ class LinkClient(private val app: Context) {
         var delay = 500L
         var attempts = 0
         bindWifi()
+        Hub.log("Key check: " + Identity.check())
         while (running) {
             Hub.phase = if (attempts == 0) Hub.Phase.CONNECTING else Hub.Phase.RECONNECTING
             Hub.pcName = target.name
@@ -192,7 +222,8 @@ class LinkClient(private val app: Context) {
         val context = Identity.sslContext(target.fp) { serverFp = it }
         var lastError: Exception? = null
         var tls: SSLSocket? = null
-        for (ip in target.ips) {
+        val local = target.ips.filter { sameSubnet(it) }
+        for (ip in if (local.isNotEmpty()) local else target.ips) {
             for (version in arrayOf("TLSv1.3", "TLSv1.2")) {
                 var raw: Socket? = null
                 try {
@@ -213,8 +244,9 @@ class LinkClient(private val app: Context) {
                     tls = ssl
                     break
                 } catch (e: Exception) {
-                    lastError = e
-                    Hub.log(ip + " " + version + ": " + e.javaClass.simpleName + " " + (e.message ?: ""))
+                    val unreachable = e is ConnectException || e is SocketTimeoutException
+                    if (lastError == null || !unreachable || lastError is ConnectException || lastError is SocketTimeoutException) lastError = e
+                    Hub.log(ip + " " + version + ": " + e.javaClass.simpleName + " " + (e.message ?: "") + (e.cause?.let { " / " + it.javaClass.simpleName + " " + (it.message ?: "") } ?: ""))
                     try {
                         raw?.close()
                     } catch (_: Exception) {

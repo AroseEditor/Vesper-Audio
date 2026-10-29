@@ -16,7 +16,8 @@ import javax.net.ssl.X509TrustManager
 import javax.security.auth.x500.X500Principal
 
 object Identity {
-    private const val ALIAS = "vesper-connector"
+    private const val ALIAS = "vesper-connector-2"
+    private const val OLD_ALIAS = "vesper-connector"
     private const val DAY = 86400000L
 
     private fun store(): KeyStore {
@@ -28,10 +29,11 @@ object Identity {
     private fun ensure() {
         val keyStore = store()
         if (keyStore.containsAlias(ALIAS)) return
+        if (keyStore.containsAlias(OLD_ALIAS)) keyStore.deleteEntry(OLD_ALIAS)
         val now = System.currentTimeMillis()
         val spec = KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_SIGN)
             .setAlgorithmParameterSpec(ECGenParameterSpec("secp256r1"))
-            .setDigests(KeyProperties.DIGEST_SHA256)
+            .setDigests(KeyProperties.DIGEST_NONE, KeyProperties.DIGEST_SHA256, KeyProperties.DIGEST_SHA384, KeyProperties.DIGEST_SHA512)
             .setCertificateSubject(X500Principal("CN=Vesper Audio Connector"))
             .setCertificateSerialNumber(BigInteger.valueOf(now))
             .setCertificateNotBefore(Date(now - DAY))
@@ -40,6 +42,18 @@ object Identity {
         val generator = KeyPairGenerator.getInstance(KeyProperties.KEY_ALGORITHM_EC, "AndroidKeyStore")
         generator.initialize(spec)
         generator.generateKeyPair()
+    }
+
+    fun check(): String = try {
+        ensure()
+        val key = store().getKey(ALIAS, null) as java.security.PrivateKey
+        val signature = java.security.Signature.getInstance("NONEwithECDSA")
+        signature.initSign(key)
+        signature.update(ByteArray(32))
+        signature.sign()
+        "signing works"
+    } catch (e: Exception) {
+        "signing failed: " + e.javaClass.simpleName + " " + (e.message ?: "")
     }
 
     fun fingerprint(): ByteArray {
