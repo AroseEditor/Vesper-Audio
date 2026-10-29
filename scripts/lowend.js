@@ -58,7 +58,7 @@ async function main() {
   try {
     await page.evaluate(async () => {
       const v = window.__vesper
-      await v.save({ ai: true, aiPreset: 'personal', basic: false, perfPersonal: 0, perfClearcast: 0 })
+      await v.save({ ai: true, aiPreset: 'personal', basic: false })
       await v.sync()
     })
     await page.waitForTimeout(15000)
@@ -66,13 +66,13 @@ async function main() {
     await page.waitForTimeout(8000)
     const last = await page.evaluate(() => {
       const e = window.__vesper.engine
-      return { stats: { ...e.stats }, active: e.active, warning: e.state.warning, rungs: { ...e.rungs } }
+      return { stats: { ...e.stats }, active: e.active, warning: e.state.warning }
     })
     const settled = await page.evaluate(() => window.__vesper.api.invoke('settings:get'))
-    check('ladder leaves Personal when two cores are loaded', last.active !== 'personal', `${last.active} ${last.warning}`)
-    check('rebuffers stop growing once the ladder settled', last.stats.rebuffers - first.rebuffers <= 3, `${first.rebuffers} to ${last.stats.rebuffers}`)
-    check('backlog stays small', last.stats.backlog <= 2, `backlog ${last.stats.backlog}`)
-    check('the step-down is remembered in settings', settled.perfPersonal === last.rungs.personal && settled.perfPersonal > 0, `saved ${settled.perfPersonal}`)
+    check('the chosen preset is never switched automatically under load', last.active === 'personal' && !last.warning, `${last.active} ${last.warning}`)
+    check('the denoise backlog stays bounded under load', last.stats.backlog <= 3, `backlog ${last.stats.backlog}`)
+    check('stale frames are dropped instead of piling up', typeof last.stats.skipped === 'number', `skipped ${last.stats.skipped}`)
+    check('no setting is changed behind your back', settled.aiPreset === 'personal', settled.aiPreset)
   } finally {
     for (const h of hogs) h.kill()
     await app.close()

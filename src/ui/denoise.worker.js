@@ -2,8 +2,6 @@ import { StreamDenoiser } from './dpdf.js'
 
 const vendor = file => new URL('./vendor/' + file, import.meta.url).href
 const MAX_QUEUE = 2
-const BENCH_FRAMES = 40
-const BENCH_SKIP = 8
 const SAMPLES = 200
 
 async function bytesOf(url) {
@@ -38,24 +36,11 @@ function summary(times) {
   return { p50: at(0.5), p95: at(0.95), max: sorted[sorted.length - 1] }
 }
 
-async function benchmark(engine) {
-  const times = []
-  for (let i = 0; i < BENCH_FRAMES; i++) {
-    const frame = new Float32Array(engine.hop)
-    for (let j = 0; j < frame.length; j++) frame[j] = (Math.random() - 0.5) * 2e-4
-    const t0 = performance.now()
-    await engine.process(frame)
-    times.push(performance.now() - t0)
-  }
-  return summary(times.slice(BENCH_SKIP))
-}
-
 self.onmessage = async e => {
   const msg = e.data
   if (msg.type !== 'init') return
   try {
     const engine = msg.backend === 'dfn3' ? await createDfn3(msg) : await createDpdf(msg)
-    const bench = await benchmark(engine)
     const queue = []
     const times = []
     let busy = false
@@ -82,7 +67,7 @@ self.onmessage = async e => {
       queue.push(ev.data)
       pump()
     }
-    self.postMessage({ type: 'ready', hop: engine.hop, bench })
+    self.postMessage({ type: 'ready', hop: engine.hop })
     setInterval(() => self.postMessage({ type: 'stats', backlog: queue.length + (busy ? 1 : 0), skipped, ...summary(times) }), 1000)
   } catch (err) {
     self.postMessage({ type: 'error', message: String((err && err.message) || err) })

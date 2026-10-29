@@ -79,8 +79,6 @@ function engineConfig() {
     monitor: s.monitor,
     boardVolume: s.boardVolume,
     personalUrl: personal ? personal.url() : '',
-    perfPersonal: s.perfPersonal,
-    perfClearcast: s.perfClearcast,
     denoiserUrl: state.denoiserUrl
   }
 }
@@ -106,11 +104,7 @@ function sync() {
 
 function refreshEngineNotice() {
   notice('engine', engine.state.error ? { text: 'Audio engine: ' + engine.state.error } : null)
-  const retry = async () => {
-    await save({ perfPersonal: 0, perfClearcast: 0 })
-    engine.resetRung()
-  }
-  notice('engineWarn', engine.state.warning ? { text: engine.state.warning, ...(engine.lowered() ? { label: 'Try again', action: retry } : {}) } : null)
+  notice('engineWarn', engine.state.warning ? { text: engine.state.warning } : null)
 }
 
 async function prepare() {
@@ -417,7 +411,6 @@ function renderSettings() {
   $('set-voice-text').textContent = personal.note()
   $('set-voice').textContent = personal.button()
   $('set-voice-remove').hidden = !personal.model()
-  $('set-perf-text').textContent = engine.lowered() ? 'Performance: reduced, this PC could not keep up with the full model' : 'Performance: full quality'
   if (phones) phones.renderSettings()
 }
 
@@ -836,11 +829,6 @@ function bindControls() {
   }
   $('voice-enroll').addEventListener('click', () => personal.open())
   $('add-phone').addEventListener('click', () => phones.openAdd())
-  $('set-perf').addEventListener('click', async () => {
-    await save({ perfPersonal: 0, perfClearcast: 0 })
-    engine.resetRung()
-    renderSettings()
-  })
 
   let levelTimer = null
   $('level').addEventListener('input', e => {
@@ -928,8 +916,6 @@ async function boot() {
   bindMenus()
   bindControls()
   engine.onSoundEnd = () => renderBoard()
-  engine.onRung = (mode, rung) => save({ [mode === 'clearcast' ? 'perfClearcast' : 'perfPersonal']: rung })
-  engine.onNotice = refreshEngineNotice
   api.on('app:hidden', () => (state.hidden = true))
   api.on('app:wake', () => engine.recover('Windows woke up, so Vesper Audio restarted the audio.'))
   state.update = await api.invoke('update:status').catch(() => null)

@@ -12,19 +12,6 @@ const FROZEN_CHECKS = 45
 const FROZEN_COOLDOWN_MS = 600000
 const DITHER = 3e-6
 const MAX_ATTENUATION_DB = 45
-const WATCH_MS = 1000
-const WATCH_WARMUP_S = 3
-const WATCH_STRIKES = 2
-const LADDERS = {
-  personal: ['personal', 'dfn3', 'rnnoise', 'speexzero'],
-  clearcast: ['clearcast', 'rnnoise', 'speexzero'],
-  rnnoise: ['rnnoise', 'speexzero'],
-  speex: ['speex', 'speexzero']
-}
-const RUNG_LABEL = { clearcast: 'ClearCast', personal: 'Personal', dfn3: 'the standard model', rnnoise: 'RNNoise', speexzero: 'Speex zero latency', speex: 'Speex', off: 'no noise cancelling' }
-const BENCH_P50_LIMIT_MS = 8
-const BENCH_P95_LIMIT_MS = 12
-const RUN_P95_LIMIT_MS = 11
 const WEAK_CORES = 4
 const asset = file => new URL(file, import.meta.url).href
 
@@ -73,15 +60,8 @@ export class Engine {
     this.onSoundEnd = () => {}
     this.phone = null
     this.stats = { underruns: 0, queued: 0, backlog: 0, target: PREBUFFER_HOPS * HOP, rebuffers: 0, drops: 0, skipped: 0, p50: 0, p95: 0, max: 0 }
-    this.rungs = {}
-    this.ladder = true
-    this.rungSeeded = false
-    this.stepDown = ''
-    this.onNotice = () => {}
-    this.onRung = () => {}
     this.scratch = new Float32Array(1024)
     this.weak = (navigator.hardwareConcurrency || 8) <= WEAK_CORES
-    this.watch = null
     this.health = null
     this.recovering = false
     this.stall = 0
@@ -115,10 +95,6 @@ export class Engine {
   }
 
   async run(cfg) {
-    if (!this.rungSeeded) {
-      this.rungs = { personal: cfg.perfPersonal | 0, clearcast: cfg.perfClearcast | 0 }
-      this.rungSeeded = true
-    }
     const key = [cfg.inputName, cfg.cableName, cfg.input ? cfg.input.kind + ':' + cfg.input.id : ''].join('|')
     if (!this.ctx || key !== this.structKey) {
       await this.build(cfg)
@@ -297,12 +273,12 @@ export class Engine {
   }
 
   async chain(cfg) {
-    const mode = this.effective(cfg)
+    const mode = modeOf(cfg)
     const ctx = this.ctx
     if (mode !== this.mode || this.denoiserKey !== this.keyFor(mode, cfg)) {
       const old = this.detachFx()
       this.mode = mode
-      if (!this.lowered()) this.state.warning = ''
+      this.state.warning = ''
       try {
         await this.buildFx(mode, cfg)
       } catch (err) {
@@ -310,11 +286,6 @@ export class Engine {
         throw err
       }
       this.discard(old, RELEASE_MS)
-      if (this.stepDown) {
-        const why = this.stepDown
-        this.stepDown = ''
-        this.bump(why)
-      }
     }
     if ((mode === 'speex' || mode === 'speexzero') && this.fxNodes.speex) this.fxNodes.speex.port.postMessage(Math.round(cfg.speexDb))
     if (mode === 'clearcast' && this.fxNodes.wet) {
@@ -324,43 +295,6 @@ export class Engine {
     }
     this.gain.gain.setTargetAtTime(Math.max(0, cfg.gain) / 100, ctx.currentTime, 0.02)
     this.dyn.port.postMessage({ gateOn: Boolean(cfg.gateOn), gateDb: cfg.gateDb, normOn: Boolean(cfg.normOn), quietDb: cfg.quietDb, loudDb: cfg.loudDb })
-  }
-
-  lowered() {
-    return Object.values(this.rungs).some(v => v > 0)
-  }
-
-  effective(cfg) {
-    const mode = modeOf(cfg)
-    const ladder = LADDERS[mode]
-    if (!ladder) return mode
-    const rung = Math.min(ladder.length - 1, this.rungs[mode] | 0)
-    return ladder[rung]
-  }
-
-  bump(why) {
-    if (!this.cfg || !this.ladder) return
-    const mode = modeOf(this.cfg)
-    const ladder = LADDERS[mode]
-    if (!ladder || (this.rungs[mode] | 0) >= ladder.length - 1) return
-    this.rungs[mode] = (this.rungs[mode] | 0) + 1
-    const to = this.effective(this.cfg)
-    this.state.warning = `${why}, so Vesper Audio switched to ${RUNG_LABEL[to] || to}.`
-    this.onRung(mode, this.rungs[mode])
-    this.onNotice()
-    this.mode = ''
-    this.apply(this.cfg)
-  }
-
-  resetRung() {
-    for (const mode of Object.keys(this.rungs)) {
-      this.rungs[mode] = 0
-      this.onRung(mode, 0)
-    }
-    this.state.warning = ''
-    this.onNotice()
-    this.mode = ''
-    if (this.cfg) this.apply(this.cfg)
   }
 
   keyFor(mode, cfg) {
@@ -402,7 +336,6 @@ export class Engine {
     try {
       const info = await ready
       if (info.hop !== HOP) throw new Error('unexpected denoiser frame size ' + info.hop)
-      node.bench = info.bench
     } catch (err) {
       worker.terminate()
       node.disconnect()
@@ -456,13 +389,10 @@ export class Engine {
       this.fxIn.connect(delay).connect(dry).connect(this.fxOut)
       add(node, wet, dry, delay)
       this.fxNodes = { denoise: node, wet, dry, delay }
-      this.startWatch()
-      if (node.bench && (node.bench.p50 > BENCH_P50_LIMIT_MS || node.bench.p95 > BENCH_P95_LIMIT_MS)) this.stepDown = `This PC needs ${node.bench.p50.toFixed(1)} ms for every 10 ms of audio with ${RUNG_LABEL[mode]}`
     }
   }
 
   async aiDenoiser(cfg) {
-    if (this.active === 'dfn3') return { node: await this.denoiser({ backend: 'dfn3' }), kind: 'dfn3' }
     if (this.active === 'personal') {
       const url = cfg.personalUrl || asset('./vendor/dfn3_ll.tar.gz')
       try {
@@ -490,30 +420,7 @@ export class Engine {
     if (delay && this.ctx) delay.delayTime.setTargetAtTime(this.dryBase + this.stats.target / this.ctx.sampleRate, this.ctx.currentTime, 0.5)
   }
 
-  startWatch() {
-    this.stopWatch()
-    let strikes = 0
-    let seen = 0
-    let last = this.stats.rebuffers
-    this.watch = setInterval(() => {
-      seen += WATCH_MS / 1000
-      const delta = this.stats.rebuffers - last
-      last = this.stats.rebuffers
-      if (seen < WATCH_WARMUP_S) return
-      strikes = this.stats.backlog >= 3 || delta >= 1 || this.stats.p95 > RUN_P95_LIMIT_MS ? strikes + 1 : 0
-      if (strikes < WATCH_STRIKES) return
-      this.stopWatch()
-      this.bump('Your CPU could not keep up')
-    }, WATCH_MS)
-  }
-
-  stopWatch() {
-    if (this.watch) clearInterval(this.watch)
-    this.watch = null
-  }
-
   detachFx() {
-    this.stopWatch()
     const old = { fx: this.fx, disposers: this.disposers }
     this.fx = []
     this.disposers = []
