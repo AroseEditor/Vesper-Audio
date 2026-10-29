@@ -17,7 +17,10 @@ class Denoise extends AudioWorkletProcessor {
     this.rd = 0
     this.wr = 0
     this.fill = 0
-    this.target = Math.max(MIN_HOPS, o.prebuffer) * this.hop
+    this.minHops = o.minHops || MIN_HOPS
+    this.maxHops = o.maxHops || MAX_HOPS
+    this.calmBlocks = o.calmBlocks || CALM_BLOCKS
+    this.target = Math.max(this.minHops, o.prebuffer) * this.hop
     this.playing = false
     this.started = false
     this.ramp = FADE_IN
@@ -126,7 +129,7 @@ class Denoise extends AudioWorkletProcessor {
         this.underruns++
         this.rebuffers++
         this.calm = 0
-        this.target = Math.min(MAX_HOPS * this.hop, this.target + this.hop)
+        this.target = Math.min(this.maxHops * this.hop, this.target + this.hop)
         this.last *= HOLD_DECAY
         output[i] = this.last
         continue
@@ -138,7 +141,7 @@ class Denoise extends AudioWorkletProcessor {
       this.last = v
       output[i] = v
     }
-    if (this.playing && ++this.calm > CALM_BLOCKS && this.target > MIN_HOPS * this.hop) {
+    if (this.playing && ++this.calm > this.calmBlocks && this.target > this.minHops * this.hop) {
       this.target -= this.hop
       this.calm = 0
     }

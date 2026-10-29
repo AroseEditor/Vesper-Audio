@@ -8,13 +8,24 @@ const DPDFNET_MODEL_DELAY = 0.062
 const RELEASE_MS = 90
 const HEALTH_MS = 2000
 const STALL_CHECKS = 3
-const FROZEN_CHECKS = 15
-const FROZEN_COOLDOWN_MS = 120000
+const FROZEN_CHECKS = 45
+const FROZEN_COOLDOWN_MS = 600000
 const DITHER = 3e-6
 const MAX_ATTENUATION_DB = 45
-const WATCH_MS = 2000
-const WATCH_WARMUP_S = 8
+const WATCH_MS = 1000
+const WATCH_WARMUP_S = 3
 const WATCH_STRIKES = 2
+const LADDERS = {
+  personal: ['personal', 'dfn3', 'rnnoise', 'speexzero'],
+  clearcast: ['clearcast', 'rnnoise', 'speexzero'],
+  rnnoise: ['rnnoise', 'speexzero'],
+  speex: ['speex', 'speexzero']
+}
+const RUNG_LABEL = { clearcast: 'ClearCast', personal: 'Personal', dfn3: 'the standard model', rnnoise: 'RNNoise', speexzero: 'Speex zero latency', speex: 'Speex', off: 'no noise cancelling' }
+const BENCH_P50_LIMIT_MS = 8
+const BENCH_P95_LIMIT_MS = 12
+const RUN_P95_LIMIT_MS = 11
+const WEAK_CORES = 4
 const asset = file => new URL(file, import.meta.url).href
 
 function leak(strength) {
@@ -60,8 +71,15 @@ export class Engine {
     this.pending = null
     this.draining = null
     this.onSoundEnd = () => {}
-    this.stats = { underruns: 0, queued: 0, backlog: 0, target: PREBUFFER_HOPS * HOP, rebuffers: 0, drops: 0 }
-    this.forceLight = false
+    this.stats = { underruns: 0, queued: 0, backlog: 0, target: PREBUFFER_HOPS * HOP, rebuffers: 0, drops: 0, skipped: 0, p50: 0, p95: 0, max: 0 }
+    this.rungs = {}
+    this.ladder = true
+    this.rungSeeded = false
+    this.stepDown = ''
+    this.onNotice = () => {}
+    this.onRung = () => {}
+    this.scratch = new Float32Array(1024)
+    this.weak = (navigator.hardwareConcurrency || 8) <= WEAK_CORES
     this.watch = null
     this.health = null
     this.recovering = false
@@ -96,6 +114,10 @@ export class Engine {
   }
 
   async run(cfg) {
+    if (!this.rungSeeded) {
+      this.rungs = { personal: cfg.perfPersonal | 0, clearcast: cfg.perfClearcast | 0 }
+      this.rungSeeded = true
+    }
     const key = [cfg.inputName, cfg.cableName].join('|')
     if (!this.ctx || key !== this.structKey) {
       await this.build(cfg)
@@ -138,8 +160,6 @@ export class Engine {
     this.sbBus = ctx.createGain()
     this.analyser = ctx.createAnalyser()
     this.analyser.fftSize = 1024
-    this.fxAnalyser = ctx.createAnalyser()
-    this.fxAnalyser.fftSize = 1024
     this.outAnalyser = ctx.createAnalyser()
     this.outAnalyser.fftSize = 1024
     this.sink = ctx.createMediaStreamDestination()
@@ -149,7 +169,6 @@ export class Engine {
     this.gain.connect(this.analyser)
     this.fxOut.connect(this.dyn)
     this.dyn.connect(this.limiter)
-    this.fxOut.connect(this.fxAnalyser)
     this.limiter.connect(this.micOut)
     this.micOut.connect(this.bus)
     this.micOut.connect(this.monitorGain)
@@ -182,10 +201,10 @@ export class Engine {
 
   rms(node) {
     if (!node) return 0
-    const buf = new Float32Array(node.fftSize)
+    const buf = this.scratch
     node.getFloatTimeDomainData(buf)
     let sum = 0
-    for (const v of buf) sum += v * v
+    for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i]
     return Math.sqrt(sum / buf.length)
   }
 
@@ -253,12 +272,12 @@ export class Engine {
   }
 
   async chain(cfg) {
-    const mode = modeOf(cfg)
+    const mode = this.effective(cfg)
     const ctx = this.ctx
     if (mode !== this.mode || this.denoiserKey !== this.keyFor(mode, cfg)) {
       const old = this.detachFx()
       this.mode = mode
-      if (!this.forceLight) this.state.warning = ''
+      if (!this.lowered()) this.state.warning = ''
       try {
         await this.buildFx(mode, cfg)
       } catch (err) {
@@ -266,6 +285,11 @@ export class Engine {
         throw err
       }
       this.discard(old, RELEASE_MS)
+      if (this.stepDown) {
+        const why = this.stepDown
+        this.stepDown = ''
+        this.bump(why)
+      }
     }
     if ((mode === 'speex' || mode === 'speexzero') && this.fxNodes.speex) this.fxNodes.speex.port.postMessage(Math.round(cfg.speexDb))
     if (mode === 'clearcast' && this.fxNodes.wet) {
@@ -275,6 +299,43 @@ export class Engine {
     }
     this.gain.gain.setTargetAtTime(Math.max(0, cfg.gain) / 100, ctx.currentTime, 0.02)
     this.dyn.port.postMessage({ gateOn: Boolean(cfg.gateOn), gateDb: cfg.gateDb, normOn: Boolean(cfg.normOn), quietDb: cfg.quietDb, loudDb: cfg.loudDb })
+  }
+
+  lowered() {
+    return Object.values(this.rungs).some(v => v > 0)
+  }
+
+  effective(cfg) {
+    const mode = modeOf(cfg)
+    const ladder = LADDERS[mode]
+    if (!ladder) return mode
+    const rung = Math.min(ladder.length - 1, this.rungs[mode] | 0)
+    return ladder[rung]
+  }
+
+  bump(why) {
+    if (!this.cfg || !this.ladder) return
+    const mode = modeOf(this.cfg)
+    const ladder = LADDERS[mode]
+    if (!ladder || (this.rungs[mode] | 0) >= ladder.length - 1) return
+    this.rungs[mode] = (this.rungs[mode] | 0) + 1
+    const to = this.effective(this.cfg)
+    this.state.warning = `${why}, so Vesper Audio switched to ${RUNG_LABEL[to] || to}.`
+    this.onRung(mode, this.rungs[mode])
+    this.onNotice()
+    this.mode = ''
+    this.apply(this.cfg)
+  }
+
+  resetRung() {
+    for (const mode of Object.keys(this.rungs)) {
+      this.rungs[mode] = 0
+      this.onRung(mode, 0)
+    }
+    this.state.warning = ''
+    this.onNotice()
+    this.mode = ''
+    if (this.cfg) this.apply(this.cfg)
   }
 
   keyFor(mode, cfg) {
@@ -288,7 +349,7 @@ export class Engine {
     const node = new AudioWorkletNode(ctx, 'vesper-denoise', {
       channelCount: 1,
       channelCountMode: 'explicit',
-      processorOptions: { hop: HOP, prebuffer: PREBUFFER_HOPS }
+      processorOptions: { hop: HOP, prebuffer: this.weak ? PREBUFFER_HOPS + 1 : PREBUFFER_HOPS, minHops: this.weak ? 2 : 1, maxHops: this.weak ? 6 : 9, calmBlocks: this.weak ? 11200 : 5600 }
     })
     node.onprocessorerror = () => this.recover('The noise cancelling engine crashed, so Vesper Audio restarted it.', true)
     node.port.postMessage({ type: 'link', port: channel.port1 }, [channel.port1])
@@ -308,7 +369,7 @@ export class Engine {
         const m = e.data
         if (m.type === 'ready') resolve(m)
         else if (m.type === 'error') reject(new Error(m.message))
-        else if (m.type === 'stats') this.stats.backlog = m.backlog
+        else if (m.type === 'stats') Object.assign(this.stats, { backlog: m.backlog, skipped: m.skipped, p50: m.p50, p95: m.p95, max: m.max })
       }
       worker.onerror = e => reject(new Error(e.message || 'denoise worker failed'))
     })
@@ -316,6 +377,7 @@ export class Engine {
     try {
       const info = await ready
       if (info.hop !== HOP) throw new Error('unexpected denoiser frame size ' + info.hop)
+      node.bench = info.bench
     } catch (err) {
       worker.terminate()
       node.disconnect()
@@ -369,12 +431,14 @@ export class Engine {
       this.fxIn.connect(delay).connect(dry).connect(this.fxOut)
       add(node, wet, dry, delay)
       this.fxNodes = { denoise: node, wet, dry, delay }
-      if (kind === 'dpdfnet' || kind === 'personal') this.startWatch()
+      this.startWatch()
+      if (node.bench && (node.bench.p50 > BENCH_P50_LIMIT_MS || node.bench.p95 > BENCH_P95_LIMIT_MS)) this.stepDown = `This PC needs ${node.bench.p50.toFixed(1)} ms for every 10 ms of audio with ${RUNG_LABEL[mode]}`
     }
   }
 
   async aiDenoiser(cfg) {
-    if (this.active === 'personal' && !this.forceLight) {
+    if (this.active === 'dfn3') return { node: await this.denoiser({ backend: 'dfn3' }), kind: 'dfn3' }
+    if (this.active === 'personal') {
       const url = cfg.personalUrl || asset('./vendor/dfn3_ll.tar.gz')
       try {
         return { node: await this.denoiser({ backend: 'dfn3', modelUrl: url }), kind: 'personal' }
@@ -384,13 +448,13 @@ export class Engine {
       }
     }
     const url = cfg.denoiserUrl
-    if (this.active === 'clearcast' && url && !this.forceLight) {
+    if (this.active === 'clearcast' && url) {
       try {
         return { node: await this.denoiser({ backend: 'dpdfnet', model: 'dpdfnet_baseline', modelUrl: url, provider: 'wasm' }), kind: 'dpdfnet' }
       } catch (err) {
         this.state.warning = 'The main AI model could not start (' + String((err && err.message) || err) + '). Using the built-in light model.'
       }
-    } else if (!this.forceLight) {
+    } else {
       this.state.warning = 'The main AI model is not downloaded yet. Using the built-in light model.'
     }
     return { node: await this.denoiser({ backend: 'dfn3' }), kind: 'dfn3' }
@@ -411,13 +475,10 @@ export class Engine {
       const delta = this.stats.rebuffers - last
       last = this.stats.rebuffers
       if (seen < WATCH_WARMUP_S) return
-      strikes = this.stats.backlog >= 4 || delta >= 2 ? strikes + 1 : 0
+      strikes = this.stats.backlog >= 3 || delta >= 1 || this.stats.p95 > RUN_P95_LIMIT_MS ? strikes + 1 : 0
       if (strikes < WATCH_STRIKES) return
-      this.forceLight = true
-      this.state.warning = 'Your CPU could not keep up with the main AI model, so Vesper Audio switched to the built-in light model.'
       this.stopWatch()
-      this.mode = ''
-      if (this.cfg) this.apply(this.cfg)
+      this.bump('Your CPU could not keep up')
     }, WATCH_MS)
   }
 
@@ -489,7 +550,6 @@ export class Engine {
     }
     if (this.sbEl.sinkId !== monitorId && this.sbEl.setSinkId) await this.sbEl.setSinkId(monitorId)
     this.monitorGain.gain.value = cfg.monitor ? 1 : 0
-    await this.sbEl.play().catch(() => {})
     this.sbBus.gain.setTargetAtTime(Math.max(0, cfg.boardVolume) / 100, this.ctx.currentTime, 0.02)
   }
 
@@ -503,10 +563,10 @@ export class Engine {
 
   measure(node) {
     if (!node) return 0
-    const buf = new Float32Array(node.fftSize)
+    const buf = this.scratch
     node.getFloatTimeDomainData(buf)
     let sum = 0
-    for (const v of buf) sum += v * v
+    for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i]
     const level = 20 * Math.log10(Math.sqrt(sum / buf.length) + 1e-9)
     return Math.min(1, Math.max(0, (level + 60) / 60))
   }
@@ -526,6 +586,7 @@ export class Engine {
       current.stop()
       return false
     }
+    if (this.sbEl.paused) await this.sbEl.play().catch(() => {})
     const source = this.ctx.createBufferSource()
     source.buffer = await this.buffer(id, url)
     const level = this.ctx.createGain()
@@ -569,7 +630,6 @@ export class Engine {
     this.ctx = null
     this.stream = null
     this.analyser = null
-    this.fxAnalyser = null
     this.outAnalyser = null
     this.dither = null
     this.mode = ''

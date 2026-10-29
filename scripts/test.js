@@ -53,6 +53,7 @@ async function launch(userData, wav, env = {}) {
 }
 
 async function modes(page) {
+  await page.evaluate(() => (window.__vesper.engine.ladder = false))
   const list = [
     ['rnnoise', { ai: false, basic: true, basicPreset: 'rnnoise' }, 10],
     ['speex', { ai: false, basic: true, basicPreset: 'speex', speexDb: -40 }, 8],
@@ -205,6 +206,21 @@ async function main() {
   check('windows endpoints detected', devices.length > 0, devices.length + ' endpoints')
 
   await modes(page)
+  const ladder = await page.evaluate(async () => {
+    const v = window.__vesper
+    const e = v.engine
+    await v.save({ ai: true, aiPreset: 'personal', basic: false })
+    await v.sync()
+    e.ladder = true
+    e.bump('Test step')
+    await new Promise(res => setTimeout(res, 3500))
+    const stepped = { active: e.active, warning: e.state.warning, lowered: e.lowered() }
+    e.ladder = false
+    e.resetRung()
+    await new Promise(res => setTimeout(res, 3500))
+    return { stepped, back: e.active }
+  })
+  check('cost ladder steps Personal down to the standard model and back', ladder.stepped.active === 'dfn3' && /standard model/.test(ladder.stepped.warning) && ladder.stepped.lowered && ladder.back === 'personal', JSON.stringify(ladder))
   await dynamics(page)
 
   await page.evaluate(() => window.__vesper.save({ ai: false, basic: false, closeToTray: true, boardVolume: 42, speexDb: -31, aiStrength: 55, basicPreset: 'speex' }))

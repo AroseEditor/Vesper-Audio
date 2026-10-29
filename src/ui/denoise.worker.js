@@ -1,6 +1,10 @@
 import { StreamDenoiser } from './dpdf.js'
 
 const vendor = file => new URL('./vendor/' + file, import.meta.url).href
+const MAX_QUEUE = 2
+const BENCH_FRAMES = 40
+const BENCH_SKIP = 8
+const SAMPLES = 200
 
 async function bytesOf(url) {
   const res = await fetch(url)
@@ -27,24 +31,59 @@ async function createDpdf(msg) {
   return { hop: 480, process: frame => denoiser.process48(frame) }
 }
 
+function summary(times) {
+  if (!times.length) return { p50: 0, p95: 0, max: 0 }
+  const sorted = times.slice().sort((a, b) => a - b)
+  const at = q => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))]
+  return { p50: at(0.5), p95: at(0.95), max: sorted[sorted.length - 1] }
+}
+
+async function benchmark(engine) {
+  const times = []
+  for (let i = 0; i < BENCH_FRAMES; i++) {
+    const frame = new Float32Array(engine.hop)
+    for (let j = 0; j < frame.length; j++) frame[j] = (Math.random() - 0.5) * 2e-4
+    const t0 = performance.now()
+    await engine.process(frame)
+    times.push(performance.now() - t0)
+  }
+  return summary(times.slice(BENCH_SKIP))
+}
+
 self.onmessage = async e => {
   const msg = e.data
   if (msg.type !== 'init') return
   try {
     const engine = msg.backend === 'dfn3' ? await createDfn3(msg) : await createDpdf(msg)
-    let queue = Promise.resolve()
-    let backlog = 0
-    msg.port.onmessage = ev => {
-      backlog++
-      queue = queue
-        .then(() => engine.process(ev.data))
-        .then(out => {
-          backlog--
-          msg.port.postMessage(out, [out.buffer])
-        })
+    const bench = await benchmark(engine)
+    const queue = []
+    const times = []
+    let busy = false
+    let skipped = 0
+    const pump = async () => {
+      if (busy) return
+      busy = true
+      while (queue.length) {
+        const frame = queue.shift()
+        let out = frame
+        if (queue.length >= MAX_QUEUE) {
+          skipped++
+        } else {
+          const t0 = performance.now()
+          out = await engine.process(frame)
+          times.push(performance.now() - t0)
+          if (times.length > SAMPLES) times.shift()
+        }
+        msg.port.postMessage(out, [out.buffer])
+      }
+      busy = false
     }
-    self.postMessage({ type: 'ready', hop: engine.hop })
-    setInterval(() => self.postMessage({ type: 'stats', backlog }), 1000)
+    msg.port.onmessage = ev => {
+      queue.push(ev.data)
+      pump()
+    }
+    self.postMessage({ type: 'ready', hop: engine.hop, bench })
+    setInterval(() => self.postMessage({ type: 'stats', backlog: queue.length + (busy ? 1 : 0), skipped, ...summary(times) }), 1000)
   } catch (err) {
     self.postMessage({ type: 'error', message: String((err && err.message) || err) })
   }

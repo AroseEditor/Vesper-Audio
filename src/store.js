@@ -15,6 +15,8 @@ const defaults = {
   basic: false,
   basicPreset: 'rnnoise',
   speexDb: -30,
+  perfPersonal: 0,
+  perfClearcast: 0,
   gateOn: false,
   gateDb: -45,
   normOn: false,
