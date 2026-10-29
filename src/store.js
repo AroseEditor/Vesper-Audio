@@ -28,6 +28,8 @@ const defaults = {
   sounds: [],
   personal: null,
   phoneName: '',
+  displayQuality: 'low',
+  displayMonitor: '',
   driverVersion: null,
   setupDone: false
 }

@@ -76,5 +76,13 @@ module.exports = {
   brand: icon => run(['brand', icon]).catch(() => runElevated(['brand', icon])),
   runSetup,
   driverInstall: dir => runElevated(['driver-install', dir]),
-  driverUninstall: () => runElevated(['driver-uninstall'])
+  driverUninstall: () => runElevated(['driver-uninstall']),
+  displays: () => run(['displays']),
+  vddStatus: () => run(['vdd-status']),
+  vddInstall: dir => runElevated(['vdd-install', dir]),
+  vddUninstall: () => runElevated(['vdd-uninstall']),
+  vddMode: (device, width, height, rate) => run(['vdd-mode', device, String(width), String(height), String(rate || 0)]).catch(() => runElevated(['vdd-mode', device, String(width), String(height), String(rate || 0)])),
+  firewallStatus: programs => run(['firewall-status', ...programs]),
+  firewallAdd: programs => runElevated(['firewall-add', ...programs]),
+  firewallRemove: programs => runElevated(['firewall-remove', ...programs])
 }

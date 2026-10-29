@@ -1,5 +1,7 @@
 mod audio;
+mod display;
 mod driver;
+mod firewall;
 mod gpu;
 
 use serde_json::{json, Value};
@@ -31,6 +33,14 @@ fn run(args: &[String]) -> Result<Value, String> {
         "driver-install" => driver::install(need(args, 1)?),
         "driver-verify" => driver::verify(need(args, 1)?),
         "driver-uninstall" => driver::uninstall(),
+        "displays" => Ok(json!({ "ok": true, "monitors": display::monitors() })),
+        "firewall-status" => firewall::status(&args[1..]),
+        "firewall-add" => firewall::add(&args[1..]),
+        "firewall-remove" => firewall::remove(&args[1..]),
+        "vdd-status" => display::status(),
+        "vdd-install" => display::install(need(args, 1)?),
+        "vdd-uninstall" => display::uninstall(),
+        "vdd-mode" => display::set_mode(need(args, 1)?, need(args, 2)?.parse::<u32>().map_err(|e| e.to_string())?, need(args, 3)?.parse::<u32>().map_err(|e| e.to_string())?, args.get(4).and_then(|v| v.parse::<u32>().ok()).unwrap_or(0)),
         other => Err(format!("unknown command {other}")),
     }
 }

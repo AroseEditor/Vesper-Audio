@@ -19,11 +19,11 @@ extern "system" {
     fn NtQuerySystemInformation(class: u32, info: *mut u8, len: u32, ret: *mut u32) -> i32;
 }
 
-fn wide(s: &str) -> Vec<u16> {
+pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-fn exec(program: &str, args: &[&str]) -> (bool, String) {
+pub fn exec(program: &str, args: &[&str]) -> (bool, String) {
     match Command::new(program).args(args).creation_flags(NO_WINDOW).output() {
         Ok(o) => (
             o.status.success(),
@@ -60,9 +60,9 @@ fn secure_boot() -> bool {
     rc.is_ok() && value == 1
 }
 
-struct Nodes {
-    set: HDEVINFO,
-    found: Vec<(SP_DEVINFO_DATA, u32)>,
+pub struct Nodes {
+    pub set: HDEVINFO,
+    pub found: Vec<(SP_DEVINFO_DATA, u32)>,
 }
 
 impl Drop for Nodes {
@@ -73,7 +73,7 @@ impl Drop for Nodes {
     }
 }
 
-fn nodes(hwid: &str) -> Result<Nodes, String> {
+pub fn nodes(hwid: &str) -> Result<Nodes, String> {
     unsafe {
         let enumerator = wide("ROOT");
         let set = SetupDiGetClassDevsW(None, PCWSTR(enumerator.as_ptr()), None, DIGCF_ALLCLASSES | DIGCF_PRESENT)
@@ -127,14 +127,18 @@ pub fn status() -> Result<Value, String> {
 }
 
 fn create_node() -> Result<(), String> {
+    create_node_for(HWID, &CLASS_MEDIA, "MEDIA")
+}
+
+pub fn create_node_for(hwid: &str, class: &GUID, class_label: &str) -> Result<(), String> {
     unsafe {
-        let set = SetupDiCreateDeviceInfoList(Some(&CLASS_MEDIA), None).map_err(|e| e.message())?;
+        let set = SetupDiCreateDeviceInfoList(Some(class), None).map_err(|e| e.message())?;
         let mut info = SP_DEVINFO_DATA { cbSize: size_of::<SP_DEVINFO_DATA>() as u32, ..Default::default() };
-        let class_name = wide("MEDIA");
+        let class_name = wide(class_label);
         let result = (|| {
-            SetupDiCreateDeviceInfoW(set, PCWSTR(class_name.as_ptr()), &CLASS_MEDIA, None, None, DICD_GENERATE_ID, Some(&mut info))
+            SetupDiCreateDeviceInfoW(set, PCWSTR(class_name.as_ptr()), class, None, None, DICD_GENERATE_ID, Some(&mut info))
                 .map_err(|e| e.message())?;
-            let mut id: Vec<u16> = HWID.encode_utf16().collect();
+            let mut id: Vec<u16> = hwid.encode_utf16().collect();
             id.extend([0, 0]);
             let bytes = std::slice::from_raw_parts(id.as_ptr() as *const u8, id.len() * 2);
             SetupDiSetDeviceRegistryPropertyW(set, &mut info, SPDRP_HARDWAREID, Some(bytes)).map_err(|e| e.message())?;
@@ -195,7 +199,7 @@ pub fn install(dir: &str) -> Result<Value, String> {
     }))
 }
 
-fn published_inf(marker: &str) -> Option<String> {
+pub fn published_inf(marker: &str) -> Option<String> {
     let root = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
     for entry in std::fs::read_dir(Path::new(&root).join("INF")).ok()?.flatten() {
         let name = entry.file_name().to_string_lossy().to_lowercase();

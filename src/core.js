@@ -173,4 +173,9 @@ function on(handlerMap) {
   handlers = { ...handlers, ...handlerMap }
 }
 
-module.exports = { call, ensure, available, hasPairedPhones, retry, stop, on, exePath }
+function programs() {
+  const dir = path.dirname(exePath())
+  return [exePath(), path.join(dir, 'vesper-display.exe')].filter(file => fs.existsSync(file))
+}
+
+module.exports = { call, ensure, available, hasPairedPhones, retry, stop, on, exePath, programs }

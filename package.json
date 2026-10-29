@@ -54,6 +54,10 @@
         "to": "vesper-core.exe"
       },
       {
+        "from": "core/target/release/vesper-display.exe",
+        "to": "vesper-display.exe"
+      },
+      {
         "from": "android-dist/Vesper-Audio-Connector.apk",
         "to": "connector.apk"
       }

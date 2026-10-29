@@ -13,6 +13,7 @@ const updater = require('./updater')
 const trainer = require('./trainer')
 const core = require('./core')
 const apk = require('./apk')
+const vdd = require('./display')
 const { wavBuffer } = require('./wav')
 
 const REPO_URL = 'https://github.com/AroseEditor/Vesper-Audio'
@@ -212,6 +213,13 @@ function handleIpc() {
   ipcMain.handle('link:available', () => core.available())
   ipcMain.handle('link:paired', () => core.hasPairedPhones())
   ipcMain.handle('apk:start', () => apk.start())
+  ipcMain.handle('display:status', () => vdd.status())
+  ipcMain.handle('display:monitors', () => vdd.monitors())
+  ipcMain.handle('display:install', () => vdd.install(p => win && !win.isDestroyed() && win.webContents.send('display:progress', p)))
+  ipcMain.handle('display:uninstall', () => vdd.uninstall())
+  ipcMain.handle('display:mode', (_, device, width, height, rate) => winaudio.vddMode(String(device), Number(width), Number(height), Number(rate) || 0))
+  ipcMain.handle('firewall:status', () => winaudio.firewallStatus(core.programs()).catch(() => ({ ok: false, allowed: false })))
+  ipcMain.handle('firewall:allow', () => winaudio.firewallAdd(core.programs()))
   ipcMain.handle('apk:stop', () => apk.stop())
   ipcMain.handle('app:link', (_, url) => (String(url).startsWith(REPO_URL) ? shell.openExternal(String(url)) : null))
   ipcMain.handle('link:retry', () => {
