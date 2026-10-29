@@ -37,7 +37,7 @@ const invokes = new Set([
   'app:log'
 ])
 
-const events = new Set(['driver:progress', 'model:progress', 'app:shown', 'update:status', 'app:wake', 'trainer:progress'])
+const events = new Set(['driver:progress', 'model:progress', 'app:shown', 'app:hidden', 'update:status', 'app:wake', 'trainer:progress'])
 
 contextBridge.exposeInMainWorld('vesper', {
   invoke: (channel, ...args) =>

@@ -21,7 +21,9 @@ const state = {
   denoiserUrl: '',
   notices: {},
   info: { version: '', testMode: false },
-  busy: false
+  busy: false,
+  hidden: false,
+  page: 'home'
 }
 
 const reason = err => String((err && err.message) || err).replace(/^Error invoking remote method '[^']*': (Error: )?/, '')
@@ -72,6 +74,8 @@ function engineConfig() {
     monitor: s.monitor,
     boardVolume: s.boardVolume,
     personalUrl: personal ? personal.url() : '',
+    perfPersonal: s.perfPersonal,
+    perfClearcast: s.perfClearcast,
     denoiserUrl: state.denoiserUrl
   }
 }
@@ -87,13 +91,21 @@ function sync() {
     try {
       await prepare()
       await engine.apply(engineConfig())
-      notice('engine', engine.state.error ? { text: 'Audio engine: ' + engine.state.error } : null)
-      notice('engineWarn', engine.state.warning ? { text: engine.state.warning } : null)
+      refreshEngineNotice()
     } finally {
       waiters.forEach(resolve => resolve())
     }
   }, 60)
   return done
+}
+
+function refreshEngineNotice() {
+  notice('engine', engine.state.error ? { text: 'Audio engine: ' + engine.state.error } : null)
+  const retry = async () => {
+    await save({ perfPersonal: 0, perfClearcast: 0 })
+    engine.resetRung()
+  }
+  notice('engineWarn', engine.state.warning ? { text: engine.state.warning, ...(engine.lowered() ? { label: 'Try again', action: retry } : {}) } : null)
 }
 
 async function prepare() {
@@ -134,6 +146,7 @@ function fill(el) {
 }
 
 function setPage(name) {
+  state.page = name
   for (const el of document.querySelectorAll('.page')) el.classList.toggle('active', el.id === 'page-' + name)
   for (const el of document.querySelectorAll('.nav')) el.classList.toggle('active', el.dataset.page === name)
   if (name === 'properties' || name === 'home') refreshDevices()
@@ -859,12 +872,19 @@ function bindControls() {
   $('set-repo').addEventListener('click', () => api.invoke('app:repo'))
 }
 
+let meterTimer = null
 function meters() {
-  $('meter-home').style.width = Math.round(engine.outLevel() * 100) + '%'
-  $('meter-props').style.width = Math.round(engine.level() * 100) + '%'
-  const gate = state.settings && state.settings.gateOn ? (engine.dynOpen ? 'Gate open' : 'Gate closed') : GATE_HINT
-  if ($('gate-state').textContent !== gate) $('gate-state').textContent = gate
-  requestAnimationFrame(meters)
+  clearInterval(meterTimer)
+  meterTimer = setInterval(() => {
+    if (state.hidden) return
+    if (state.page === 'home') {
+      $('meter-home').style.transform = `scaleX(${engine.outLevel().toFixed(3)})`
+      const gate = state.settings && state.settings.gateOn ? (engine.dynOpen ? 'Gate open' : 'Gate closed') : GATE_HINT
+      if ($('gate-state').textContent !== gate) $('gate-state').textContent = gate
+    } else if (state.page === 'properties') {
+      $('meter-props').style.transform = `scaleX(${engine.level().toFixed(3)})`
+    }
+  }, 50)
 }
 
 async function boot() {
@@ -877,6 +897,9 @@ async function boot() {
   bindMenus()
   bindControls()
   engine.onSoundEnd = () => renderBoard()
+  engine.onRung = (mode, rung) => save({ [mode === 'clearcast' ? 'perfClearcast' : 'perfPersonal']: rung })
+  engine.onNotice = refreshEngineNotice
+  api.on('app:hidden', () => (state.hidden = true))
   api.on('app:wake', () => engine.recover('Windows woke up, so Vesper Audio restarted the audio.'))
   state.update = await api.invoke('update:status').catch(() => null)
   api.on('update:status', s => {
@@ -894,9 +917,12 @@ async function boot() {
     sync()
   })
   setInterval(() => {
-    if (!document.hidden) refreshDevices()
+    if (!state.hidden) refreshDevices()
   }, 4000)
-  api.on('app:shown', refreshDevices)
+  api.on('app:shown', () => {
+    state.hidden = false
+    refreshDevices()
+  })
   if (!state.settings.setupDone && !(vacOut() && vacIn())) {
     await save({ setupDone: true })
     installDriver()

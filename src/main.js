@@ -29,10 +29,14 @@ app.commandLine.appendSwitch('disable-background-timer-throttling')
 app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
 app.commandLine.appendSwitch('disable-features', 'CalculateNativeWinOcclusion')
 
+const raised = new Set()
 function raisePriority() {
   for (const m of app.getAppMetrics()) {
+    const audio = m.type === 'Tab' || (m.serviceName || '').toLowerCase().includes('audio')
+    if (!audio || raised.has(m.pid)) continue
     try {
-      os.setPriority(m.pid, os.constants.priority.PRIORITY_HIGH)
+      os.setPriority(m.pid, os.constants.priority.PRIORITY_ABOVE_NORMAL)
+      raised.add(m.pid)
     } catch {}
   }
 }
@@ -51,6 +55,10 @@ function showWindow() {
   win.show()
   win.focus()
   win.webContents.send('app:shown')
+}
+
+function announceVisibility(visible) {
+  if (win && !win.isDestroyed()) win.webContents.send(visible ? 'app:shown' : 'app:hidden')
 }
 
 function createWindow() {
@@ -80,6 +88,8 @@ function createWindow() {
   win.once('ready-to-show', () => {
     if (!process.argv.includes('--hidden') && !testMode) win.show()
   })
+  for (const [event, visible] of [['show', true], ['restore', true], ['hide', false], ['minimize', false]]) win.on(event, () => announceVisibility(visible))
+  win.webContents.on('did-finish-load', () => announceVisibility(win.isVisible() && !win.isMinimized()))
   win.on('close', e => {
     if (!quitting && store.get().closeToTray) {
       e.preventDefault()
@@ -227,5 +237,5 @@ app.whenReady().then(() => {
   powerMonitor.on('resume', wake)
   powerMonitor.on('unlock-screen', wake)
   if (!testMode) updater.start(s => win && !win.isDestroyed() && win.webContents.send('update:status', s))
-  setInterval(raisePriority, 5000).unref()
+  setInterval(raisePriority, 15000).unref()
 })
