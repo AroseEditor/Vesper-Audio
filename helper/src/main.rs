@@ -40,6 +40,9 @@ fn run(args: &[String]) -> Result<Value, String> {
         "vdd-status" => display::status(),
         "vdd-install" => display::install(need(args, 1)?),
         "vdd-uninstall" => display::uninstall(),
+        "vdd-attach" => display::attach(need(args, 1)?.parse::<u32>().map_err(|e| e.to_string())?, need(args, 2)?.parse::<u32>().map_err(|e| e.to_string())?, args.get(3).and_then(|v| v.parse::<u32>().ok()).unwrap_or(60)),
+        "vdd-detach" => display::detach(),
+        "vdd-modes" => display::modes(),
         "vdd-mode" => display::set_mode(need(args, 1)?, need(args, 2)?.parse::<u32>().map_err(|e| e.to_string())?, need(args, 3)?.parse::<u32>().map_err(|e| e.to_string())?, args.get(4).and_then(|v| v.parse::<u32>().ok()).unwrap_or(0)),
         other => Err(format!("unknown command {other}")),
     }

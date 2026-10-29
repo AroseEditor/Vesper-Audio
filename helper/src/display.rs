@@ -3,6 +3,8 @@ use serde_json::{json, Value};
 use std::mem::size_of;
 use std::path::Path;
 use windows::core::{BOOL, GUID, PCWSTR};
+use windows::Win32::Devices::Display::{SetDisplayConfig, SDC_APPLY, SDC_TOPOLOGY_EXTEND};
+use windows::Win32::Foundation::POINTL;
 use windows::Win32::Devices::DeviceAndDriverInstallation::*;
 use windows::Win32::Graphics::Gdi::*;
 
@@ -51,6 +53,173 @@ pub fn monitors() -> Value {
     Value::Array(list)
 }
 
+struct Output {
+    name: String,
+    attached: bool,
+    primary: bool,
+}
+
+fn is_virtual(adapter: &str) -> bool {
+    let lower = adapter.to_lowercase();
+    lower.contains("virtual display") || lower.contains("mtt")
+}
+
+fn virtual_output() -> Option<Output> {
+    unsafe {
+        let mut index = 0;
+        loop {
+            let mut device = DISPLAY_DEVICEW { cb: size_of::<DISPLAY_DEVICEW>() as u32, ..Default::default() };
+            if !EnumDisplayDevicesW(PCWSTR::null(), index, &mut device, 0).as_bool() {
+                return None;
+            }
+            index += 1;
+            if is_virtual(&text(&device.DeviceString)) {
+                return Some(Output {
+                    name: text(&device.DeviceName),
+                    attached: (device.StateFlags & DISPLAY_DEVICE_ATTACHED_TO_DESKTOP).0 != 0,
+                    primary: (device.StateFlags & DISPLAY_DEVICE_PRIMARY_DEVICE).0 != 0,
+                });
+            }
+        }
+    }
+}
+
+pub fn modes() -> Result<Value, String> {
+    let output = virtual_output().ok_or("the virtual display was not found")?;
+    let name = wide(&output.name);
+    let mut list = Vec::new();
+    unsafe {
+        let mut index = 0;
+        loop {
+            let mut mode = DEVMODEW { dmSize: size_of::<DEVMODEW>() as u16, ..Default::default() };
+            if !EnumDisplaySettingsW(PCWSTR(name.as_ptr()), ENUM_DISPLAY_SETTINGS_MODE(index), &mut mode).as_bool() {
+                break;
+            }
+            index += 1;
+            list.push(json!([mode.dmPelsWidth, mode.dmPelsHeight, mode.dmDisplayFrequency, mode.dmBitsPerPel]));
+        }
+    }
+    Ok(json!({ "ok": true, "device": output.name, "modes": list }))
+}
+
+fn best_mode(name: &[u16], width: u32, height: u32, rate: u32) -> Option<(u32, u32, u32)> {
+    let mut best: Option<((bool, u64, u32), (u32, u32, u32))> = None;
+    unsafe {
+        let mut index = 0;
+        loop {
+            let mut mode = DEVMODEW { dmSize: size_of::<DEVMODEW>() as u16, ..Default::default() };
+            if !EnumDisplaySettingsW(PCWSTR(name.as_ptr()), ENUM_DISPLAY_SETTINGS_MODE(index), &mut mode).as_bool() {
+                break;
+            }
+            index += 1;
+            if mode.dmPelsWidth == 0 || mode.dmPelsHeight == 0 {
+                continue;
+            }
+            let area = (mode.dmPelsWidth as u64 * mode.dmPelsHeight as u64).abs_diff(width as u64 * height as u64);
+            let key = (mode.dmPelsWidth != width || mode.dmPelsHeight != height, area, mode.dmDisplayFrequency.abs_diff(rate));
+            if best.as_ref().map(|(k, _)| key < *k).unwrap_or(true) {
+                best = Some((key, (mode.dmPelsWidth, mode.dmPelsHeight, mode.dmDisplayFrequency)));
+            }
+        }
+    }
+    best.map(|(_, mode)| mode)
+}
+
+fn apply(name: &[u16], mode: &DEVMODEW) -> Result<(), String> {
+    unsafe {
+        let staged = ChangeDisplaySettingsExW(PCWSTR(name.as_ptr()), Some(mode), None, CDS_UPDATEREGISTRY | CDS_NORESET, None);
+        if staged != DISP_CHANGE_SUCCESSFUL {
+            return Err(format!("Windows refused the display change ({})", staged.0));
+        }
+        let applied = ChangeDisplaySettingsExW(PCWSTR::null(), None, None, CDS_TYPE(0), None);
+        if applied != DISP_CHANGE_SUCCESSFUL {
+            return Err(format!("Windows could not apply the display change ({})", applied.0));
+        }
+    }
+    Ok(())
+}
+
+fn settle(wanted: bool) -> bool {
+    for _ in 0..30 {
+        if virtual_output().map(|o| o.attached) == Some(wanted) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    false
+}
+
+fn snapshot() -> Vec<(String, u32, u32, u32)> {
+    monitors()
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .filter(|m| m["virtual"] != true)
+                .map(|m| (m["device"].as_str().unwrap_or("").to_string(), m["width"].as_u64().unwrap_or(0) as u32, m["height"].as_u64().unwrap_or(0) as u32, m["rate"].as_u64().unwrap_or(0) as u32))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn restore(before: &[(String, u32, u32, u32)]) {
+    let now = snapshot();
+    for (device, w, h, rate) in before {
+        if now.iter().any(|(d, nw, nh, nr)| d == device && (nw != w || nh != h || nr != rate)) {
+            let _ = set_mode(device, *w, *h, *rate);
+        }
+    }
+}
+
+pub fn attach(width: u32, height: u32, rate: u32) -> Result<Value, String> {
+    let output = virtual_output().ok_or("the virtual display was not found, is the driver installed")?;
+    if output.attached {
+        let current = monitors();
+        return Ok(json!({ "ok": true, "device": output.name, "monitors": current }));
+    }
+    let before = snapshot();
+    let name = wide(&output.name);
+    let (w, h, f) = best_mode(&name, width, height, rate).unwrap_or((width, height, rate));
+    let right = monitors().as_array().map(|list| list.iter().map(|m| m["left"].as_i64().unwrap_or(0) + m["width"].as_i64().unwrap_or(0)).max().unwrap_or(0)).unwrap_or(0);
+    let mut mode = DEVMODEW { dmSize: size_of::<DEVMODEW>() as u16, ..Default::default() };
+    mode.dmPelsWidth = w;
+    mode.dmPelsHeight = h;
+    mode.dmDisplayFrequency = f;
+    mode.dmBitsPerPel = 32;
+    mode.Anonymous1.Anonymous2.dmPosition = POINTL { x: right as i32, y: 0 };
+    mode.dmFields = DM_POSITION | DM_PELSWIDTH | DM_PELSHEIGHT | DM_DISPLAYFREQUENCY | DM_BITSPERPEL;
+    if apply(&name, &mode).is_err() || !settle(true) {
+        let extended = unsafe { SetDisplayConfig(None, None, SDC_APPLY | SDC_TOPOLOGY_EXTEND) };
+        if extended != 0 || !settle(true) {
+            return Err(format!("Windows did not turn the virtual display on ({})", extended));
+        }
+        let _ = set_mode(&output.name, w, h, f);
+    }
+    restore(&before);
+    Ok(json!({ "ok": true, "device": output.name, "monitors": monitors() }))
+}
+
+pub fn detach() -> Result<Value, String> {
+    let output = match virtual_output() {
+        Some(o) => o,
+        None => return Ok(json!({ "ok": true, "attached": false })),
+    };
+    if !output.attached {
+        return Ok(json!({ "ok": true, "attached": false }));
+    }
+    if output.primary {
+        return Err("the virtual display is the main display, it was left on".into());
+    }
+    let before = snapshot();
+    let name = wide(&output.name);
+    let mut mode = DEVMODEW { dmSize: size_of::<DEVMODEW>() as u16, ..Default::default() };
+    mode.Anonymous1.Anonymous2.dmPosition = POINTL { x: 0, y: 0 };
+    mode.dmFields = DM_POSITION | DM_PELSWIDTH | DM_PELSHEIGHT;
+    apply(&name, &mode)?;
+    settle(false);
+    restore(&before);
+    Ok(json!({ "ok": true, "attached": false, "monitors": monitors() }))
+}
+
 pub fn status() -> Result<Value, String> {
     let found = nodes(VDD_HWID)?;
     let problem = found.found.first().map(|(_, p)| *p);
@@ -60,6 +229,7 @@ pub fn status() -> Result<Value, String> {
         "problem": problem,
         "running": problem == Some(0),
         "monitors": monitors(),
+        "virtual": virtual_output().map(|o| json!({ "device": o.name, "attached": o.attached })),
     }))
 }
 
@@ -125,7 +295,7 @@ pub fn set_mode(device: &str, width: u32, height: u32, rate: u32) -> Result<Valu
         let name = wide(device);
         let mut mode = DEVMODEW { dmSize: size_of::<DEVMODEW>() as u16, ..Default::default() };
         if !EnumDisplaySettingsW(PCWSTR(name.as_ptr()), ENUM_CURRENT_SETTINGS, &mut mode).as_bool() {
-            return Err("that display was not found".into());
+            return Err(format!("that display was not found ({})", device));
         }
         mode.dmPelsWidth = width;
         mode.dmPelsHeight = height;
