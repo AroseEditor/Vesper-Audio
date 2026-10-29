@@ -150,7 +150,7 @@ function setPage(name) {
   for (const el of document.querySelectorAll('.nav')) el.classList.toggle('active', el.dataset.page === name)
   if (name === 'properties' || name === 'home') refreshDevices()
   if ((name === 'display' || name === 'settings') && phones) phones.refreshSystem()
-  if (name === 'display' && phones) phones.refresh().then(() => phones.newCode())
+  if (name === 'display' && phones) phones.refresh().then(() => phones.ensureFirewall()).then(() => phones.newCode())
 }
 
 function dialog({ title, body, actions = [] }) {

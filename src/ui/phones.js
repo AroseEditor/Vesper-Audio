@@ -110,6 +110,13 @@ export class Phones {
       this.changed()
     } else if (name === 'sas') {
       this.showCode(data)
+    } else if (name === 'attempt') {
+      if (data.ok) this.notice('attempt', null)
+      else this.notice('attempt', { text: `A phone at ${data.addr} reached this PC but the secure connection failed: ${data.message}. Scan a fresh code and try again.` })
+    } else if (name === 'bluetooth') {
+      if (data.state === 'paired') this.notice('bluetooth', { text: `${data.name || 'Your phone'} paired over Bluetooth. It is now joining over Wi-Fi.` })
+      else if (data.state === 'status' && !data.ok) this.notice('bluetooth', { text: data.message || 'The phone could not reach this PC over Wi-Fi. Check Windows Firewall and that both are on the same Wi-Fi.' })
+      else this.notice('bluetooth', null)
     } else if (name === 'display') {
       if (data.state === 'error') this.notice('display', { text: data.message })
       else if (data.state === 'started') this.notice('display', null)
@@ -186,6 +193,7 @@ export class Phones {
   async openAdd() {
     this.adding = true
     await this.refresh()
+    await this.ensureFirewall()
     await this.newCode()
     this.dialog({ title: 'Add phone mic', body: h('div', { id: 'add-body' }), actions: [{ label: 'Get the Connector app', onClick: () => this.openApk() }, { label: 'Close', primary: true, onClick: () => this.closeAdd() }] })
     this.renderAdd()
@@ -219,7 +227,7 @@ export class Phones {
       this.phoneRow(p, [h('button', { class: 'btn small primary', type: 'button', text: p.online ? 'Use this phone' : 'Waiting', disabled: !p.online, onclick: () => this.use(p) })])
     )
     body.replaceChildren(
-      h('p', { text: 'Open Vesper Audio Connector on your phone, choose Use as PC microphone and scan this code. The phone must be on the same Wi-Fi as this PC.' }),
+      h('p', { text: 'Open Vesper Audio Connector on your phone and scan this code. Keep Bluetooth on: the phone connects to this PC over Bluetooth first, checks, then joins over Wi-Fi. Both must be on the same Wi-Fi.' }),
       this.qrBlock(),
       h('p', { class: 'hint', text: 'The code works once and expires after two minutes. Phones that are already paired connect on their own.' }),
       ...(rows.length ? [h('h3', { class: 'step-title', text: 'Paired phones' }), ...rows] : [])
@@ -264,6 +272,41 @@ export class Phones {
     this.vdd = await this.api.invoke('display:status').catch(() => ({ nodePresent: false, running: false, monitors: [] }))
     this.renderSettings()
     this.render()
+  }
+
+  async ensureFirewall() {
+    if (this.state.info.testMode) return true
+    const status = await this.api.invoke('firewall:status').catch(() => ({ allowed: true }))
+    this.firewall = status
+    if (status.allowed) return true
+    return new Promise(resolve => {
+      const network = status.profile ? `Your network is set to ${status.profile}. ` : ''
+      this.dialog({
+        title: 'Let your phone reach this PC',
+        body: [
+          h('p', { text: 'Windows Firewall blocks phones from connecting to Vesper Audio until you allow it. ' + network + 'This adds one rule for Vesper Audio only and needs one administrator approval.' }),
+          h('p', { class: 'hint', text: 'Without it the phone shows Reconnecting and never connects.' })
+        ],
+        actions: [
+          {
+            label: 'Not now',
+            onClick: () => {
+              this.closeDialog()
+              resolve(false)
+            }
+          },
+          {
+            label: 'Allow',
+            primary: true,
+            onClick: async () => {
+              this.closeDialog()
+              await this.allowFirewall()
+              resolve(Boolean(this.firewall && this.firewall.allowed))
+            }
+          }
+        ]
+      })
+    })
   }
 
   async allowFirewall() {
@@ -347,7 +390,7 @@ export class Phones {
     const btn = (label, onclick, disabled) => h('button', { class: 'btn', type: 'button', text: label, onclick, disabled: Boolean(disabled) })
     const status = this.status
     const rows = [
-      row(status ? `Phone link is on: ${status.name}, port ${status.port}` : this.failed || 'Phone link starts when you open Second Monitor or add a phone', btn('Download Vesper Audio Connector', () => this.openApk()), ...(this.firewall && !this.firewall.allowed && status ? [btn('Allow in Windows Firewall', () => this.allowFirewall())] : [])),
+      row(status ? `Phone link is on: ${status.name}, port ${status.port}, Bluetooth ${status.bluetooth ? 'ready' : 'not available'}` : this.failed || 'Phone link starts when you open Second Monitor or add a phone', btn('Download Vesper Audio Connector', () => this.openApk()), ...(this.firewall && !this.firewall.allowed ? [btn('Allow in Windows Firewall', () => this.allowFirewall())] : [])),
       ...this.paired().map(p => row(`Phone: ${p.name}${p.model ? ' (' + p.model + ')' : ''}${p.online ? ', online' : ', offline'}`, btn('Forget', () => this.call('link.forget', { id: p.id })))),
       row(this.driverText(), btn('Install', () => this.installDisplayDriver(), this.vddBusy || (this.vdd && this.vdd.nodePresent)), btn('Uninstall', () => this.removeDisplayDriver(), this.vddBusy || !(this.vdd && this.vdd.nodePresent)))
     ]
