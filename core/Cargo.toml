@@ -1,0 +1,35 @@
+[package]
+name = "vesper-core"
+version = "2.0.0"
+edition = "2021"
+
+[lib]
+name = "vesper_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "vesper-core"
+path = "src/main.rs"
+
+[[bin]]
+name = "fakephone"
+path = "src/bin/fakephone.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rcgen = "0.13"
+sha2 = "0.10"
+aes-gcm = "0.10"
+rand = "0.8"
+base64 = "0.22"
+mdns-sd = "0.13"
+if-addrs = "0.13"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "unwind"
+strip = true
