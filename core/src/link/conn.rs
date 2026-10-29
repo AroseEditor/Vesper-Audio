@@ -77,6 +77,7 @@ fn serve(inner: Arc<Inner>, tcp: TcpStream, peer: SocketAddr, registered: Arc<At
         match stream.conn.complete_io(&mut stream.sock) {
             Ok(_) => {}
             Err(e) if is_timeout(&e) => {}
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "the phone closed the connection during the secure handshake")),
             Err(e) => return Err(e),
         }
         if Instant::now() > deadline {

@@ -111,6 +111,12 @@ fn urlenc(text: &str) -> String {
     out
 }
 
+fn primary_ip() -> Option<IpAddr> {
+    let socket = UdpSocket::bind(("0.0.0.0", 0)).ok()?;
+    socket.connect(("8.8.8.8", 80)).ok()?;
+    socket.local_addr().ok().map(|a| a.ip())
+}
+
 pub fn local_ips() -> Vec<IpAddr> {
     let mut out: Vec<IpAddr> = Vec::new();
     if let Ok(list) = if_addrs::get_if_addrs() {
@@ -127,6 +133,12 @@ pub fn local_ips() -> Vec<IpAddr> {
     }
     out.sort();
     out.dedup();
+    if let Some(main) = primary_ip() {
+        if let Some(at) = out.iter().position(|ip| *ip == main) {
+            let first = out.remove(at);
+            out.insert(0, first);
+        }
+    }
     out
 }
 
