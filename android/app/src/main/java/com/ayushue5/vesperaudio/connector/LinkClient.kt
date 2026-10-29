@@ -1,6 +1,8 @@
 package com.ayushue5.vesperaudio.connector
 
 import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.os.BatteryManager
 import android.os.Build
 import android.os.SystemClock
@@ -60,6 +62,50 @@ class LinkClient(private val app: Context) {
         Hub.changed()
     }
 
+    fun startPairing(target: Target, token: String, mac: String) {
+        stop()
+        running = true
+        Hub.error = ""
+        confirm.clear()
+        val thread = Thread({ pairThenLoop(target, token, mac) }, "vesper-link")
+        worker = thread
+        thread.start()
+    }
+
+    private fun pairThenLoop(target: Target, token: String, mac: String) {
+        Hub.phase = Hub.Phase.CONNECTING
+        Hub.pcName = target.name
+        Hub.step = "Pairing over Bluetooth..."
+        Hub.changed()
+        val result = BluetoothPairing(app).pair(mac, token, prefs.deviceId, prefs.deviceName)
+        if (!running) return
+        if (result.ok) {
+            Hub.log("Bluetooth paired with " + result.name)
+            Hub.step = "Paired over Bluetooth. Joining over Wi-Fi..."
+            Hub.changed()
+            loop(Target((result.ips + target.ips).distinct(), result.port, result.fp, result.name), null)
+        } else {
+            Hub.log("Bluetooth: " + result.message)
+            Hub.step = "Bluetooth did not work (" + result.message + "). Trying Wi-Fi..."
+            Hub.changed()
+            loop(target, token)
+        }
+    }
+
+    private fun bindWifi() {
+        try {
+            val manager = app.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            for (network in manager.allNetworks) {
+                val capabilities = manager.getNetworkCapabilities(network) ?: continue
+                if (capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI)) {
+                    manager.bindProcessToNetwork(network)
+                    return
+                }
+            }
+        } catch (_: Exception) {
+        }
+    }
+
     fun confirmCode(ok: Boolean) {
         confirm.offer(ok)
     }
@@ -68,7 +114,7 @@ class LinkClient(private val app: Context) {
 
     private fun describe(error: Exception): String = when (error) {
         is PairException -> error.message ?: "Pairing failed."
-        is SocketTimeoutException, is ConnectException, is UnknownHostException -> "Could not reach the PC. Check that it is on the same Wi-Fi and that Vesper Audio is open."
+        is SocketTimeoutException, is ConnectException, is UnknownHostException -> "Could not reach the PC (" + (error.message ?: "no answer") + "). Check it is on the same Wi-Fi, that Vesper Audio is open, and press Allow in Windows Firewall on the PC."
         is CertificateException -> "This is not the PC you scanned. Scan the code again."
         is SSLHandshakeException -> "The secure connection to the PC failed. Scan the pairing code again."
         is SSLException -> "The secure connection to the PC failed."
@@ -80,6 +126,7 @@ class LinkClient(private val app: Context) {
         var token = firstToken
         var delay = 500L
         var attempts = 0
+        bindWifi()
         while (running) {
             Hub.phase = if (attempts == 0) Hub.Phase.CONNECTING else Hub.Phase.RECONNECTING
             Hub.pcName = target.name
@@ -94,6 +141,7 @@ class LinkClient(private val app: Context) {
             } catch (e: Exception) {
                 if (!running) return
                 Hub.error = describe(e)
+                Hub.log(Hub.error)
                 if (e is PairException) {
                     running = false
                     Hub.phase = Hub.Phase.IDLE
@@ -145,26 +193,36 @@ class LinkClient(private val app: Context) {
         var lastError: Exception? = null
         var tls: SSLSocket? = null
         for (ip in target.ips) {
-            try {
-                val raw = Socket()
-                raw.connect(InetSocketAddress(ip, target.port), 3000)
-                raw.tcpNoDelay = true
-                raw.soTimeout = 5000
-                val ssl = context.socketFactory.createSocket(raw, ip, target.port, true) as SSLSocket
-                ssl.useClientMode = true
-                ssl.enabledProtocols = arrayOf("TLSv1.3")
+            for (version in arrayOf("TLSv1.3", "TLSv1.2")) {
+                var raw: Socket? = null
                 try {
-                    val params = ssl.sslParameters
-                    params.applicationProtocols = arrayOf("vesper/1")
-                    ssl.sslParameters = params
-                } catch (_: Throwable) {
+                    raw = Socket()
+                    raw.connect(InetSocketAddress(ip, target.port), 3000)
+                    raw.tcpNoDelay = true
+                    raw.soTimeout = 5000
+                    val ssl = context.socketFactory.createSocket(raw, ip, target.port, true) as SSLSocket
+                    ssl.useClientMode = true
+                    ssl.enabledProtocols = arrayOf(version)
+                    try {
+                        val params = ssl.sslParameters
+                        params.applicationProtocols = arrayOf("vesper/1")
+                        ssl.sslParameters = params
+                    } catch (_: Throwable) {
+                    }
+                    ssl.startHandshake()
+                    tls = ssl
+                    break
+                } catch (e: Exception) {
+                    lastError = e
+                    Hub.log(ip + " " + version + ": " + e.javaClass.simpleName + " " + (e.message ?: ""))
+                    try {
+                        raw?.close()
+                    } catch (_: Exception) {
+                    }
+                    if (e is ConnectException || e is SocketTimeoutException) break
                 }
-                ssl.startHandshake()
-                tls = ssl
-                break
-            } catch (e: Exception) {
-                lastError = e
             }
+            if (tls != null) break
         }
         val ssl = tls ?: throw (lastError ?: IOException("No address to try."))
         socket = ssl
@@ -214,6 +272,8 @@ class LinkClient(private val app: Context) {
         Hub.pcName = pcName
         Hub.error = ""
         Hub.phase = Hub.Phase.CONNECTED
+        Hub.step = ""
+        Hub.log("Connected to " + pcName)
         Hub.changed()
 
         var sentIntent = ""

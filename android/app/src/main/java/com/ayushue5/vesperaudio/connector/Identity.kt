@@ -64,7 +64,7 @@ object Identity {
 
             override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
         }
-        val context = SSLContext.getInstance("TLSv1.3")
+        val context = SSLContext.getInstance("TLS")
         context.init(managers.keyManagers, arrayOf(trust), SecureRandom())
         return context
     }

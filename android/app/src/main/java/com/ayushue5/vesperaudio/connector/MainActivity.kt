@@ -31,6 +31,8 @@ class MainActivity : Activity() {
     private lateinit var discovery: Discovery
     private lateinit var status: TextView
     private lateinit var detail: TextView
+    private lateinit var logView: TextView
+    private var pendingPair: String? = null
     private lateinit var scan: Button
     private lateinit var mic: Button
     private lateinit var monitor: Button
@@ -93,6 +95,10 @@ class MainActivity : Activity() {
         detail = label(14f, muted)
         detail.setPadding(0, dp(6), 0, dp(10))
         column.addView(detail)
+        logView = label(11f, muted)
+        logView.typeface = android.graphics.Typeface.MONOSPACE
+        logView.setTextIsSelectable(true)
+        column.addView(logView)
         scan = button("Scan the QR code on your PC", true) { startScan() }
         column.addView(scan)
         mic = button("Use as PC microphone", false) { toggleMic() }
@@ -171,7 +177,7 @@ class MainActivity : Activity() {
             .addOnFailureListener { Toast.makeText(this, "Could not scan. You can also type the PC address below.", Toast.LENGTH_LONG).show() }
     }
 
-    private fun pair(raw: String) {
+    private fun pair(raw: String, allowBluetooth: Boolean = true) {
         val uri = Uri.parse(raw)
         if (uri.scheme != "vesper" || uri.host != "pair") {
             Toast.makeText(this, "That is not a Vesper Audio pairing code.", Toast.LENGTH_LONG).show()
@@ -185,7 +191,18 @@ class MainActivity : Activity() {
             Toast.makeText(this, "The pairing code is incomplete. Show a new one on the PC.", Toast.LENGTH_LONG).show()
             return
         }
-        Hub.client(this).start(Target(ips, port, fp, uri.getQueryParameter("n") ?: "PC"), token)
+        val target = Target(ips, port, fp, uri.getQueryParameter("n") ?: "PC")
+        val mac = uri.getQueryParameter("b")
+        if (mac != null && mac.length == 12 && allowBluetooth) {
+            if (Build.VERSION.SDK_INT >= 31 && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+                pendingPair = raw
+                requestPermissions(arrayOf(Manifest.permission.BLUETOOTH_CONNECT), 2)
+                return
+            }
+            Hub.client(this).startPairing(target, token, mac)
+        } else {
+            Hub.client(this).start(target, token)
+        }
     }
 
     private fun connectByAddress() {
@@ -234,6 +251,12 @@ class MainActivity : Activity() {
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 2) {
+            val raw = pendingPair
+            pendingPair = null
+            if (raw != null) pair(raw, grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED)
+            return
+        }
         if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) startMic()
         else Toast.makeText(this, "The microphone permission is needed to use this phone as a microphone.", Toast.LENGTH_LONG).show()
     }
@@ -284,8 +307,10 @@ class MainActivity : Activity() {
                 status.setTextColor(text)
             }
         }
+        logView.text = Hub.logText()
         detail.text = when {
             Hub.error.isNotEmpty() -> Hub.error
+            Hub.step.isNotEmpty() && Hub.phase != Hub.Phase.CONNECTED -> Hub.step
             Hub.phase == Hub.Phase.CONNECTED -> "This phone and the PC are linked over Wi-Fi."
             saved == null -> "Open Vesper Audio on your PC, go to Second Monitor and scan the code it shows."
             else -> "Open Vesper Audio on your PC and keep both on the same Wi-Fi."

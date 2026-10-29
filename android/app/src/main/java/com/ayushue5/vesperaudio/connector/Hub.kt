@@ -21,6 +21,18 @@ object Hub {
     @Volatile var display: DisplayRequest? = null
     @Volatile var videoFps = 0
     @Volatile var micWanted = false
+    @Volatile var step = ""
+    private val lines = java.util.ArrayDeque<String>()
+
+    fun log(line: String) {
+        synchronized(lines) {
+            lines.addLast(java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date()) + " " + line)
+            while (lines.size > 12) lines.removeFirst()
+        }
+        changed()
+    }
+
+    fun logText(): String = synchronized(lines) { lines.joinToString("\n") }
 
     private val ui = Handler(Looper.getMainLooper())
     private val listeners = CopyOnWriteArrayList<Runnable>()
