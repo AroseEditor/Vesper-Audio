@@ -34,32 +34,48 @@
 
 ## Contents
 
-1. [What's new in 2.0.0](#whats-new-in-200)
-2. [What it is](#what-it-is)
-3. [Screens](#screens)
-4. [Install and updates](#install-and-updates)
-5. [Quick start](#quick-start)
-6. [Vesper Audio Connector (Android)](#vesper-audio-connector-android)
-7. [Phone microphone](#phone-microphone)
-8. [Second monitor](#second-monitor)
-9. [Vesper Link: pairing, security and the network](#vesper-link-pairing-security-and-the-network)
-10. [Features](#features)
-11. [Noise cancellation modes](#noise-cancellation-modes)
-12. [Noise gate and loudness normalization](#noise-gate-and-loudness-normalization)
-13. [Train your voice model](#train-your-voice-model)
-14. [Latency and performance on low-end PCs](#latency-and-performance-on-low-end-pcs)
-15. [Reliable audio and diagnostics](#reliable-audio-and-diagnostics)
-16. [Vesper Audio Cable](#vesper-audio-cable)
-17. [Real Windows properties](#real-windows-properties)
-18. [Tests and benchmarks](#tests-and-benchmarks)
-19. [Architecture](#architecture)
-20. [Build from source](#build-from-source)
-21. [CI and releases](#ci-and-releases)
-22. [Data and privacy](#data-and-privacy)
-23. [Troubleshooting](#troubleshooting)
-24. [Honest limits](#honest-limits)
-25. [Repository layout](#repository-layout)
-26. [Licenses and credits](#licenses-and-credits)
+1. [What's new in 2.0.1](#whats-new-in-201)
+2. [What's new in 2.0.0](#whats-new-in-200)
+3. [What it is](#what-it-is)
+4. [Screens](#screens)
+5. [Install and updates](#install-and-updates)
+6. [Quick start](#quick-start)
+7. [Vesper Audio Connector (Android)](#vesper-audio-connector-android)
+8. [Phone microphone](#phone-microphone)
+9. [Second monitor](#second-monitor)
+10. [Vesper Link: pairing, security and the network](#vesper-link-pairing-security-and-the-network)
+11. [Features](#features)
+12. [Noise cancellation modes](#noise-cancellation-modes)
+13. [Noise gate and loudness normalization](#noise-gate-and-loudness-normalization)
+14. [Train your voice model](#train-your-voice-model)
+15. [Latency and performance on low-end PCs](#latency-and-performance-on-low-end-pcs)
+16. [Reliable audio and diagnostics](#reliable-audio-and-diagnostics)
+17. [Vesper Audio Cable](#vesper-audio-cable)
+18. [Real Windows properties](#real-windows-properties)
+19. [Tests and benchmarks](#tests-and-benchmarks)
+20. [Architecture](#architecture)
+21. [Build from source](#build-from-source)
+22. [CI and releases](#ci-and-releases)
+23. [Data and privacy](#data-and-privacy)
+24. [Troubleshooting](#troubleshooting)
+25. [Honest limits](#honest-limits)
+26. [Repository layout](#repository-layout)
+27. [Licenses and credits](#licenses-and-credits)
+
+---
+
+## What's new in 2.0.1
+
+Version 2.0.1 fixes the phone connection that kept saying **Reconnecting** and never connected.
+
+| Fix | What changed |
+| --- | --- |
+| **The real cause: Windows Firewall** | A Wi-Fi network that Windows calls **Public** blocks every inbound connection, and no rule for Vesper Audio existed, so the phone could never reach the PC. Opening **Second Monitor** or **+ Add phone mic** now asks once to **Allow** Vesper Audio through Windows Firewall (one administrator approval). The rule covers `vesper-core.exe` and `vesper-display.exe` on every network profile, and **Settings, Allow in Windows Firewall** does the same at any time. |
+| **Scan, then Bluetooth, then Wi-Fi** | The QR code now also carries the PC's Bluetooth address. The phone connects to the PC over Bluetooth first, shows the PC it is talking to, the PC checks the single-use code and accepts the phone, and then both join over Wi-Fi. If Bluetooth is off, unavailable or fails, the phone falls back to the code over Wi-Fi by itself. |
+| **Clear errors** | The Connector shows the step it is on (Pairing over Bluetooth, Joining over Wi-Fi) and a short log of what failed, with the address and the reason. The PC shows a notice when a phone reached it but the secure connection failed, and when a phone paired over Bluetooth. |
+| **Sturdier Wi-Fi connection** | The phone sends its traffic over Wi-Fi even when mobile data is on, and tries TLS 1.2 when TLS 1.3 fails. The PC accepts both. |
+
+Bluetooth is used for pairing only. Audio and screen still travel over your Wi-Fi. The Connector asks for the **Nearby devices** permission once. The Bluetooth step has not been run on a real phone by its author, see [Honest limits](#honest-limits).
 
 ---
 
@@ -179,7 +195,7 @@ Requirements: Android 10 (API 29) or newer. The app is about 1.5 MB.
 | Element | Behavior |
 | --- | --- |
 | Status line | **Not connected to a PC**, **Paired with <PC>**, **Connecting to <PC>...**, **Reconnecting to <PC>...** or **Connected to <PC>**. The PC name is the Windows computer name. |
-| Scan the QR code on your PC | Uses the Google code scanner (no camera permission needed). Scanning with the phone's camera app also works, the code opens the Connector directly. |
+| Scan the QR code on your PC | Uses the Google code scanner (no camera permission needed). Scanning with the phone's camera app also works, the code opens the Connector directly. The phone pairs over Bluetooth first (it asks for Nearby devices once), then joins over Wi-Fi. The step and a short log are shown under the status line. |
 | Use as PC microphone | Asks for the microphone and notification permissions, starts the foreground service and sends your voice to the PC. |
 | Mute microphone / Unmute microphone | Appears while the microphone is in use. **The microphone is on by default and stays on until you mute it.** While muted the phone sends nothing and the microphone is released, and the PC shows **Muted on phone**. The same toggle is in the notification. |
 | Use as second monitor | Opens a full-screen landscape viewer. Start the screen from the PC. |
@@ -198,7 +214,7 @@ Requirements: Android 10 (API 29) or newer. The app is about 1.5 MB.
 
 ### Permissions
 
-Microphone (to send your voice), notifications (for the foreground service), network, Wi-Fi state and multicast (to find the PC), wake lock, foreground service microphone, ignore battery optimizations (optional prompt). The app does not use the camera permission, location or contacts.
+Microphone (to send your voice), notifications (for the foreground service), Nearby devices (Bluetooth, only to pair with the PC), network, Wi-Fi state and multicast (to find the PC), wake lock, foreground service microphone, ignore battery optimizations (optional prompt). The app does not use the camera permission, location or contacts.
 
 ### Signing
 
@@ -274,14 +290,15 @@ The full byte-level description is in [docs/protocol.md](docs/protocol.md). In s
 | Topic | Detail |
 | --- | --- |
 | Discovery | The PC advertises `_vesper-link._tcp` with mDNS. The phone browses it. The QR code and a typed `ip:port` work when multicast is blocked. |
-| Control channel | TCP port 47100 (a random free port when taken, always advertised and placed in the QR code), TLS 1.3 with mutual certificates. |
+| Control channel | TCP port 47100 (a random free port when taken, always advertised and placed in the QR code), TLS with mutual certificates (1.3, and 1.2 as a fallback). |
 | Identities | The PC makes a self-signed ECDSA P-256 certificate on first run. The phone's key lives in the Android Keystore. |
-| QR pairing | The QR code holds the PC addresses, port, the SHA-256 of the PC certificate and a 16-byte single-use token that works for 120 seconds. The phone only trusts a PC whose certificate matches. |
+| QR pairing | The QR code holds the PC addresses, port, the SHA-256 of the PC certificate, the PC's Bluetooth address and a 16-byte single-use token that works for 120 seconds. The phone only trusts a PC whose certificate matches. |
+| Bluetooth step | The PC offers a small Bluetooth (RFCOMM) service. The phone connects to the address in the QR code, sends the token and its certificate fingerprint, the PC checks the token (single use), stores the fingerprint as a paired phone and answers with its name, addresses and port. The phone then connects over Wi-Fi as a known phone. Without Bluetooth the phone sends the token over Wi-Fi instead. |
 | Code pairing | With no QR code, both screens show the same six digits derived from both certificates and both random numbers. You press match on both, so a stranger on the network cannot slip in. |
 | Known phones | Once paired, the phone's certificate fingerprint is stored and the phone connects with no prompt. **Forget** on the PC removes it, so it must pair again. |
 | Media | UDP, AES-128-GCM per packet with a fresh random key for every session, the packet header as authenticated data, and a nonce built from the session salt, the packet kind and a counter. |
 | Heartbeat | The phone pings every second. No ping for six seconds ends the session on the PC. |
-| Firewall | Windows asks to allow the link component the first time. **Settings, Allow in Windows Firewall** adds an inbound rule for `vesper-core.exe` and `vesper-display.exe` on private and domain networks only. |
+| Firewall | Vesper Audio asks once to allow itself through Windows Firewall (one administrator approval). **Settings, Allow in Windows Firewall** adds the same inbound rule for `vesper-core.exe` and `vesper-display.exe` on every network profile, because a Wi-Fi network that Windows marks **Public** blocks phones otherwise. |
 | Safety checks | The Kotlin code and the Rust code are tested against the same vectors (`proto/vectors.json`): identical encrypted packets, identical six-digit codes. |
 
 What is on the wire is only your audio and screen, to a phone you paired. Nothing goes to the internet.
@@ -458,7 +475,7 @@ For the rare PC where VB-CABLE cannot be used. **Settings, Fallback driver**. A 
 | Allow processing or bypass (audio enhancements) | undocumented `IPolicyConfig::SetPropertyValue` on the FX store, key `PKEY_AudioEndpoint_Disable_SysFx` `{1da5d803-d492-4edd-8c23-e0c0ffee7f0e},5` |
 | Cable name and icon | `IPolicyConfig::SetPropertyValue` on the endpoint store (string values must be `VT_LPWSTR`) |
 | Displays (second monitor) | `EnumDisplayDevices`, `EnumDisplaySettings` and `ChangeDisplaySettingsEx` through the helper |
-| Firewall rule | `netsh advfirewall`, program scoped, private and domain profiles |
+| Firewall rule | `New-NetFirewallRule`, program scoped, inbound allow, every network profile |
 
 None of the endpoint properties need administrator rights. Installing a driver, trusting a publisher and adding a firewall rule do.
 
@@ -579,8 +596,8 @@ The fallback audio driver needs the Windows Driver Kit and Visual Studio 2022. I
 | `publish` | One GitHub release with all assets. A tag with a dash (for example `v2.1.0-rc.1`) is published as a pre-release |
 
 ```powershell
-git tag v2.0.0
-git push origin v2.0.0
+git tag v2.0.1
+git push origin v2.0.1
 ```
 
 Repository secrets used by the `android` job: `ANDROID_KEYSTORE_B64` (the base64 of the keystore), `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS`, `ANDROID_KEY_PASSWORD`. Keep an offline backup of the keystore: without it the app can no longer be updated over an installed copy. Manual runs (`workflow_dispatch`) take `target` (`all`, `driver`, `app`, `android`) and `publish` (default false), so a build can be checked without releasing.
@@ -611,7 +628,8 @@ On the phone, the pairing key lives in the Android Keystore and the paired PC (a
 
 | Symptom | Cause and fix |
 | --- | --- |
-| The phone says it cannot reach the PC | Both must be on the same Wi-Fi (not a guest network that isolates devices). Open Vesper Audio on the PC, press **Allow in Windows Firewall** in Settings, and scan a fresh code. Typing the PC address under **Connect by address** works when discovery is blocked. |
+| The phone keeps saying Reconnecting, or cannot reach the PC | Almost always Windows Firewall. Open Vesper Audio, press **Allow** when it asks (or **Settings, Allow in Windows Firewall**), then scan a fresh code. Both must be on the same Wi-Fi (not a guest network that isolates devices). The log under the status line on the phone shows the address and the reason of each failed try. Typing the PC address under **Connect by address** works when discovery is blocked. |
+| Bluetooth did not work when pairing | The log on the phone says why. Turn Bluetooth on at the PC and the phone, allow Nearby devices, and keep the phone near the PC. If it fails the phone continues over Wi-Fi by itself, so pairing can still work. A PC without Bluetooth just uses Wi-Fi. |
 | The QR code is refused | It works once and for two minutes. Press **New code**. |
 | The six-digit codes differ | Press Cancel on both and start again. Do not pair unless they match. |
 | No PCs listed under nearby | Some routers block multicast. Use the QR code. |
@@ -638,7 +656,8 @@ On the phone, the pairing key lives in the Android Keystore and the paired PC (a
 * **Phone microphone latency and second monitor latency have not been measured end to end on real hardware.** The stage numbers above are measured or estimated, the glass-to-glass number is not known.
 * **The virtual display driver was not installed in the build environment** because that needs an administrator click. Its package signature was verified (valid, SignPath Foundation) and the helper commands were exercised for the status and listing parts. A SignPath-signed user-mode driver should load with Secure Boot on, but that was not confirmed here.
 * The second monitor uses the Windows software H.264 encoder. A weak CPU will feel it. It has no touch input, no audio, and one phone at a time.
-* **The native audio engine and Bluetooth discovery that were planned are not in 2.0.0.** Discovery uses mDNS, the QR code, a typed address and the six-digit code.
+* **The native audio engine that was planned is not in 2.0.x.** Bluetooth is used only for the pairing step after a QR scan, not for discovering phones or carrying audio. Discovery uses mDNS, the QR code, a typed address and the six-digit code.
+* **The Bluetooth pairing step was tested with a stand-in phone and by checking that the PC service starts, not with a real phone.** Whether a particular phone and Windows Bluetooth adapter accept the connection is unverified. When it fails the phone falls back to Wi-Fi.
 * The phone microphone uses PCM audio and Android's standard recorder, not a compressed codec or the lowest-latency native recorder.
 * **Personal is the most expensive mode** (about 7 to 13 ms of CPU per 10 ms of audio here). On a weak PC it will crackle, and the app will not switch for you. Pick ClearCast or a Basic mode.
 * The base models are open source and were not trained by this project. There is no head-to-head claim against NVIDIA Broadcast or any commercial product.
