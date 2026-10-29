@@ -127,7 +127,10 @@ h2 { font-size: 20px; font-weight: 600; margin: 0 0 12px; }
 .note .btn { margin-left: auto; }
 
 .device-card { display: flex; align-items: center; gap: 14px; }
-.device-card .select { flex: 1; }
+.device-card .select { flex: 1; min-width: 0; }
+.device-card .label { flex: none; white-space: nowrap; }
+.device-card .select-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.device-card .btn { flex: none; white-space: nowrap; }
 
 .select { position: relative; }
 .select-btn {
